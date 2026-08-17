@@ -144,7 +144,7 @@
           <label>Aynı anda çalışan tarayıcı</label>
           <input id="max-concurrent" type="number" min="1" max="50" value="2">
         </div>
-        <p class="hint" style="margin:0">8 GB RAM için 8 tarayıcı. Hedefe gelen kelime durur; boşalan yerde sıradaki başlar.</p>
+        <p class="hint" style="margin:0">Sunucuda 3 tarayıcı varsayılan. 8 GB’de 8 açmak paneli kilitler. Hedefe gelen kelime durur.</p>
         <button type="submit">Ayarları kaydet</button>
       </form>
       <div class="actions" style="margin-top:12px; justify-content:flex-start">
@@ -173,6 +173,7 @@
     let lastJobsHtml = "";
     let lastChartSig = "";
     let lastChipHtml = "";
+    let refreshBusy = false;
 
     function esc(value) {
       return String(value ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
@@ -319,10 +320,17 @@
       };
       canvas.onmouseleave = () => { tip.style.display = "none"; };
     }
-    function openChart(jobId) {
+    async function openChart(jobId) {
       chartJobId = jobId;
       lastChartSig = "";
       modal.classList.add("show");
+      try {
+        const res = await fetch("/api/jobs/" + encodeURIComponent(jobId));
+        const job = await res.json();
+        lastState.jobs = (lastState.jobs || []).map(item =>
+          item.id === job.id ? Object.assign({}, item, { history: job.history || [] }) : item
+        );
+      } catch (err) {}
       drawChart(jobId);
     }
     function closeChart() {
@@ -352,14 +360,14 @@
       return groups.map(group => {
         const rows = (group.jobs || []).map(job => {
           const busy = job.status === "running" || job.status === "starting" || job.status === "stopping";
-          return `<tr>
+          return `<tr data-job="${job.id}">
             <td>${esc(job.keyword)}</td>
-            <td><span class="n">${posValue(job.overall)}</span>${deltaHtml(job.overall_delta)}</td>
-            <td>${posValue(job.best_overall)}</td>
+            <td data-f="overall"><span class="n">${posValue(job.overall)}</span>${deltaHtml(job.overall_delta)}</td>
+            <td data-f="best">${posValue(job.best_overall)}</td>
             <td>${job.target_rank}</td>
-            <td>${job.success}/${job.attempts}</td>
-            <td>${badge(job.status)}${job.workers ? ` · ${job.workers} tarayıcı` : ""}</td>
-            <td class="err">${job.last_error ? esc(job.last_error) : (job.fail ? job.fail + " hata (son mesaj yok)" : "")}</td>
+            <td data-f="score">${job.success}/${job.attempts}</td>
+            <td data-f="status">${badge(job.status)}${job.workers ? ` · ${job.workers} tarayıcı` : ""}</td>
+            <td class="err" data-f="err">${job.last_error ? esc(job.last_error) : (job.fail ? job.fail + " hata (son mesaj yok)" : "")}</td>
             <td>
               <div class="row-actions">
                 <button class="ghost" data-chart="${job.id}">Grafik</button>
@@ -396,22 +404,48 @@
           </div>`;
       }).join("");
     }
+    function jobsSkeleton(state) {
+      return (state.groups || []).map(group =>
+        group.product_id + ":" + (group.jobs || []).map(job =>
+          job.id + "/" + job.status + "/" + (job.workers || 0)
+        ).join(",")
+      ).join("|");
+    }
+    function patchJobs(state) {
+      for (const job of state.jobs || []) {
+        const row = jobsEl.querySelector(`[data-job="${job.id}"]`);
+        if (!row) continue;
+        const overall = row.querySelector('[data-f="overall"]');
+        const best = row.querySelector('[data-f="best"]');
+        const score = row.querySelector('[data-f="score"]');
+        const err = row.querySelector('[data-f="err"]');
+        if (overall) overall.innerHTML = `<span class="n">${posValue(job.overall)}</span>${deltaHtml(job.overall_delta)}`;
+        if (best) best.textContent = posValue(job.best_overall);
+        if (score) score.textContent = job.success + "/" + job.attempts;
+        if (err) err.textContent = job.last_error ? job.last_error : (job.fail ? job.fail + " hata (son mesaj yok)" : "");
+      }
+    }
     function render(state) {
       updateKpis(state);
       renderChips(state);
-      const html = jobsMarkup(state);
-      if (html !== lastJobsHtml) {
-        jobsEl.innerHTML = html;
-        lastJobsHtml = html;
+      const skeleton = jobsSkeleton(state);
+      if (skeleton !== lastJobsHtml) {
+        jobsEl.innerHTML = jobsMarkup(state);
+        lastJobsHtml = skeleton;
+      } else {
+        patchJobs(state);
       }
     }
     async function refresh() {
-      const res = await fetch("/api/state");
-      lastState = await res.json();
-      if (!chartJobId) render(lastState);
-      else {
-        updateKpis(lastState);
-        drawChart(chartJobId);
+      if (refreshBusy) return;
+      refreshBusy = true;
+      try {
+        const res = await fetch("/api/state");
+        lastState = await res.json();
+        if (!chartJobId) render(lastState);
+        else updateKpis(lastState);
+      } finally {
+        refreshBusy = false;
       }
     }
     async function post(url, body) {
@@ -489,7 +523,7 @@
     document.getElementById("chart-close").addEventListener("click", closeChart);
     modal.addEventListener("click", (e) => { if (e.target === modal) closeChart(); });
     refresh();
-    setInterval(refresh, 1000);
+    setInterval(refresh, 3000);
   </script>
 </body>
 </html>

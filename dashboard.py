@@ -27,7 +27,7 @@ DEFAULT_JOBS = [
     {"keyword": "parmak eldiveni", "product_id": "817896706"},
 ]
 DEFAULT_TARGET_RANK = 10
-DEFAULT_MAX_CONCURRENT = 8
+DEFAULT_MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "8"))
 MAX_CONCURRENT_LIMIT = 50
 PRODUCT_IN_TEXT = re.compile(r"-p-(\d+)")
 
@@ -244,7 +244,6 @@ def public_job(job: dict) -> dict:
         "best_overall": stats.get("best_overall"),
         "target_rank": int(stats.get("target_rank") or TARGET_RANK),
         "workers": len(job_workers(job)),
-        "history": normalize_hourly_history(stats.get("history") or []),
     }
 
 
@@ -291,10 +290,6 @@ def public_state() -> dict:
     }
 
 
-def running_count() -> int:
-    return sum(1 for job in JOBS.values() if job_thread_alive(job))
-
-
 def maybe_start_queued_locked() -> None:
     enabled = [
         job
@@ -305,7 +300,10 @@ def maybe_start_queued_locked() -> None:
         return
     while running_count() < MAX_CONCURRENT:
         job = min(enabled, key=lambda item: len(job_workers(item)))
+        before = running_count()
         spawn_worker(job)
+        if running_count() <= before:
+            break
 
 
 def save_product_image(product_id: str, image_url: str) -> None:
@@ -665,6 +663,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if path in {"/health", "/healthz"}:
+            self._json(200, {"ok": True})
+            return
         if path in {"/", "/index.html"}:
             html = Path(__file__).with_name("panel.html").read_text(encoding="utf-8")
             self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
@@ -672,6 +673,19 @@ class Handler(BaseHTTPRequestHandler):
         if path in {"/api/jobs", "/api/state"}:
             with LOCK:
                 payload = public_state()
+            self._json(200, payload)
+            return
+        if path.startswith("/api/jobs/"):
+            job_id = unquote(path.rstrip("/").split("/")[-1])
+            with LOCK:
+                job = JOBS.get(job_id)
+                if not job:
+                    self._json(404, {"error": "Döngü bulunamadı"})
+                    return
+                payload = public_job(job)
+                payload["history"] = normalize_hourly_history(
+                    job["stats"].get("history") or []
+                )
             self._json(200, payload)
             return
         self._json(404, {"error": "Bulunamadı"})

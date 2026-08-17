@@ -8,12 +8,29 @@ services:
       DATA_DIR: /app/data
       OPEN_BROWSER: "0"
       PLAYWRIGHT_DOCKER: "1"
+      MAX_CONCURRENT: "3"
+    ports:
+      - "8765"
     expose:
       - "8765"
     volumes:
       - panel-data:/app/data
     shm_size: "2gb"
+    mem_limit: 4g
+    pids_limit: 200
     init: true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
 
 volumes:
   panel-data:
