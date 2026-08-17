@@ -37,7 +37,28 @@ KEYWORDS: list[str] = []
 TARGET_RANK = DEFAULT_TARGET_RANK
 MAX_CONCURRENT = DEFAULT_MAX_CONCURRENT
 PRODUCT_IMAGES: dict[str, str] = {}
-LOCK = threading.Lock()
+class TimedLock:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        return self._lock.acquire(blocking, timeout)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def __enter__(self) -> TimedLock:
+        if not self._lock.acquire(timeout=4):
+            raise TimeoutError(
+                "Panel meşgul. Coolify'da uygulamayı Stop edip tekrar Start edin."
+            )
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._lock.release()
+
+
+LOCK = TimedLock()
 HISTORY_LOCK = threading.Lock()
 JOBS_FILE_LOCK = threading.Lock()
 
@@ -133,7 +154,7 @@ def persist_jobs_locked() -> None:
     payload = snapshot_state()
     with JOBS_FILE_LOCK:
         JOBS_FILE.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             encoding="utf-8",
         )
 
@@ -444,13 +465,16 @@ def assign_keywords(product_ids: list[str] | None = None, keywords: list[str] | 
         if not words:
             raise ValueError("Önce kelime ekleyin.")
         existing = {(job["keyword"], job["product_id"]) for job in JOBS.values()}
+        history_data = load_history_file()
         for product_id in targets:
             remember_catalog("", product_id)
             for keyword in words:
                 remember_catalog(keyword, product_id)
                 if (keyword, product_id) in existing:
                     continue
-                history = history_for(keyword, product_id)
+                history = normalize_hourly_history(
+                    history_data.get(history_key(keyword, product_id), [])
+                )
                 job = {
                     "id": uuid.uuid4().hex[:8],
                     "keyword": keyword,
@@ -640,13 +664,17 @@ def restore_jobs() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, format: str, *args) -> None:
         return
 
     def _send(self, code: int, body: bytes, content_type: str) -> None:
+        self.close_connection = True
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -663,32 +691,35 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
-        if path in {"/health", "/healthz"}:
-            self._json(200, {"ok": True})
-            return
-        if path in {"/", "/index.html"}:
-            html = Path(__file__).with_name("panel.html").read_text(encoding="utf-8")
-            self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
-            return
-        if path in {"/api/jobs", "/api/state"}:
-            with LOCK:
-                payload = public_state()
-            self._json(200, payload)
-            return
-        if path.startswith("/api/jobs/"):
-            job_id = unquote(path.rstrip("/").split("/")[-1])
-            with LOCK:
-                job = JOBS.get(job_id)
-                if not job:
-                    self._json(404, {"error": "Döngü bulunamadı"})
-                    return
-                payload = public_job(job)
-                payload["history"] = normalize_hourly_history(
-                    job["stats"].get("history") or []
-                )
-            self._json(200, payload)
-            return
-        self._json(404, {"error": "Bulunamadı"})
+        try:
+            if path in {"/health", "/healthz"}:
+                self._json(200, {"ok": True})
+                return
+            if path in {"/", "/index.html"}:
+                html = Path(__file__).with_name("panel.html").read_text(encoding="utf-8")
+                self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+                return
+            if path in {"/api/jobs", "/api/state"}:
+                with LOCK:
+                    payload = public_state()
+                self._json(200, payload)
+                return
+            if path.startswith("/api/jobs/"):
+                job_id = unquote(path.rstrip("/").split("/")[-1])
+                with LOCK:
+                    job = JOBS.get(job_id)
+                    if not job:
+                        self._json(404, {"error": "Döngü bulunamadı"})
+                        return
+                    payload = public_job(job)
+                    payload["history"] = normalize_hourly_history(
+                        job["stats"].get("history") or []
+                    )
+                self._json(200, payload)
+                return
+            self._json(404, {"error": "Bulunamadı"})
+        except TimeoutError as exc:
+            self._json(503, {"error": str(exc)})
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path.rstrip("/")
@@ -730,6 +761,9 @@ class Handler(BaseHTTPRequestHandler):
                 job_id = path.split("/")[-2]
                 self._json(200, start_job(job_id))
                 return
+        except TimeoutError as exc:
+            self._json(503, {"error": str(exc)})
+            return
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
             return
@@ -756,6 +790,8 @@ class Handler(BaseHTTPRequestHandler):
             job_id = path.rsplit("/", 1)[-1]
             delete_job(job_id)
             self._json(200, {"ok": True})
+        except TimeoutError as exc:
+            self._json(503, {"error": str(exc)})
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
         except KeyError as exc:
