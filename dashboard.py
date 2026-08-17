@@ -291,21 +291,18 @@ def public_state() -> dict:
     }
 
 
-def running_count() -> int:
-    return sum(1 for job in JOBS.values() if job_thread_alive(job))
-
-
 def maybe_start_queued_locked() -> None:
     enabled = [
         job
         for job in JOBS.values()
-        if job.get("enabled") and job["stats"].get("status") != "done"
+        if job.get("enabled")
+        and job["stats"].get("status") != "done"
+        and not job_thread_alive(job)
     ]
-    if not enabled:
-        return
-    while running_count() < MAX_CONCURRENT:
+    while enabled and running_count() < MAX_CONCURRENT:
         job = min(enabled, key=lambda item: len(job_workers(item)))
         spawn_worker(job)
+        enabled.remove(job)
 
 
 def save_product_image(product_id: str, image_url: str) -> None:
