@@ -1,0 +1,9 @@
+.venv/
+venv/
+__pycache__/
+.git/
+*.pyc
+ethernet-fix.ps1
+rank_history.json
+saved_jobs.json
+*.md

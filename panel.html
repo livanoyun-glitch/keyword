@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trendyol Döngü Paneli</title>
+  <style>
+    :root {
+      --bg: #101114;
+      --panel: #181a1f;
+      --line: #2a2d34;
+      --text: #f2f3f5;
+      --muted: #9aa1ad;
+      --accent: #f27a1a;
+      --ok: #3dd68c;
+      --bad: #ff5d5d;
+      --warn: #f5c518;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Segoe UI, sans-serif; background: var(--bg); color: var(--text); }
+    .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 48px; }
+    h1 { margin: 0 0 6px; font-size: 26px; font-weight: 650; }
+    .sub { color: var(--muted); margin-bottom: 24px; }
+    .kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-bottom: 22px; }
+    .kpi, .panel, .job { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+    .kpi { padding: 16px 18px; }
+    .kpi .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+    .kpi .value { font-size: 28px; font-weight: 700; margin-top: 6px; }
+    .ok { color: var(--ok); }
+    .bad { color: var(--bad); }
+    .panel { padding: 18px; margin-bottom: 16px; }
+    .panel h2 { margin: 0 0 8px; font-size: 16px; }
+    .hint { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .row { display: flex; gap: 8px; }
+    input, textarea, button, select { font: inherit; border-radius: 8px; border: 1px solid var(--line); padding: 11px 12px; }
+    input, textarea, select { background: #111318; color: var(--text); width: 100%; }
+    textarea { min-height: 84px; resize: vertical; }
+    button { background: var(--accent); color: #111; font-weight: 700; cursor: pointer; border: 0; white-space: nowrap; }
+    button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 600; }
+    .settings { display: grid; grid-template-columns: 160px 180px 1fr auto; gap: 10px; align-items: end; }
+    .field label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; min-height: 28px; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: #111318; border: 1px solid var(--line); border-radius: 999px;
+      padding: 6px 10px; font-size: 13px;
+    }
+    .chip button { padding: 0; background: none; color: var(--muted); font-size: 14px; line-height: 1; }
+    .jobs { display: grid; gap: 12px; }
+    .job { padding: 16px 18px; }
+    .job-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
+    .pid { font-size: 18px; font-weight: 700; font-family: Consolas, monospace; }
+    .job-meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .badge { font-size: 11px; font-weight: 700; padding: 4px 8px; border-radius: 999px; text-transform: uppercase; }
+    .running { background: #163326; color: var(--ok); }
+    .stopped, .idle, .stopping { background: #2a2d34; color: var(--muted); }
+    .error { background: #3a1515; color: var(--bad); }
+    .starting, .queued { background: #3a2e10; color: var(--warn); }
+    .done { background: #163326; color: var(--ok); }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+    .empty { color: var(--muted); padding: 20px; text-align: center; }
+    table.kw { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.kw th, table.kw td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+    table.kw th { color: var(--muted); font-weight: 600; font-size: 12px; }
+    table.kw .n { font-size: 16px; font-weight: 700; }
+    .delta { font-size: 13px; font-weight: 700; margin-left: 6px; }
+    .delta.flat { color: var(--muted); font-weight: 600; }
+    .row-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    .row-actions button { padding: 7px 10px; font-size: 12px; }
+    .modal {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,.62);
+      z-index: 20; align-items: center; justify-content: center; padding: 20px;
+    }
+    .modal.show { display: flex; }
+    .modal-box {
+      width: min(920px, 100%); max-height: 92vh; overflow: auto;
+      background: var(--panel); border: 1px solid var(--line);
+      border-radius: 12px; padding: 18px;
+    }
+    .modal-top { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+    .modal-top h2 { margin: 0; font-size: 18px; }
+    .chart-caption { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .chart-box { position: relative; }
+    .chart-tip {
+      display: none; position: absolute; pointer-events: none;
+      background: #111318; border: 1px solid var(--line); color: var(--text);
+      padding: 8px 10px; border-radius: 8px; font-size: 12px; z-index: 2;
+    }
+    .hour-table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 13px; }
+    .hour-table th, .hour-table td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+    .hour-table th { color: var(--muted); font-weight: 600; }
+    #rank-canvas { width: 100%; height: 340px; display: block; }
+    @media (max-width: 900px) {
+      .kpis, .grid-2, .settings { grid-template-columns: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Trendyol döngü paneli</h1>
+    <p class="sub">Önce ürünleri ekleyin, sonra aynı kelimeleri tümüne dağıtın. Kelime hedef sıraya gelince kendiliğinden durur.</p>
+    <div class="kpis">
+      <div class="kpi"><div class="label">Aktif</div><div class="value" id="kpi-active">0</div></div>
+      <div class="kpi"><div class="label">Sırada</div><div class="value" id="kpi-queued">0</div></div>
+      <div class="kpi"><div class="label">Toplam tur</div><div class="value" id="kpi-attempts">0</div></div>
+      <div class="kpi"><div class="label">Başarılı</div><div class="value ok" id="kpi-success">0</div></div>
+      <div class="kpi"><div class="label">Başarısız</div><div class="value bad" id="kpi-fail">0</div></div>
+    </div>
+    <div class="panel">
+      <div class="grid-2">
+        <div>
+          <h2>1. Ürünleri ekle</h2>
+          <p class="hint">Her satıra bir ürün kodu veya Trendyol linki. Tek tek veya toplu yapıştırın.</p>
+          <form id="product-form" class="row">
+            <textarea id="product-text" placeholder="825575043&#10;https://www.trendyol.com/...-p-817896706"></textarea>
+            <button type="submit">Ürün ekle</button>
+          </form>
+          <div class="chips" id="product-chips"></div>
+        </div>
+        <div>
+          <h2>2. Ortak kelimeler</h2>
+          <p class="hint">Aynı kategorideki kelimeler. Bir kez yazın, sonra tüm ürünlere dağıtın.</p>
+          <form id="keyword-form" class="row">
+            <textarea id="keyword-text" placeholder="parmak eldiven&#10;parmak eldiveni&#10;oyuncu eldiveni"></textarea>
+            <button type="submit">Kelime ekle</button>
+          </form>
+          <div class="chips" id="keyword-chips"></div>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <form id="settings-form" class="settings">
+        <div class="field">
+          <label>Hedef sıra</label>
+          <input id="target-rank" type="number" min="1" value="10">
+        </div>
+        <div class="field">
+          <label>Aynı anda çalışan tarayıcı</label>
+          <input id="max-concurrent" type="number" min="1" max="50" value="2">
+        </div>
+        <p class="hint" style="margin:0">1–50 tarayıcı. Hedefe gelen kelime durur; boşalan yerde sıradaki başlar.</p>
+        <button type="submit">Ayarları kaydet</button>
+      </form>
+      <div class="actions" style="margin-top:12px; justify-content:flex-start">
+        <button id="assign-btn" type="button">Kelimeleri tüm ürünlere dağıt</button>
+      </div>
+    </div>
+    <div class="jobs" id="jobs"></div>
+  </div>
+  <div class="modal" id="chart-modal">
+    <div class="modal-box">
+      <div class="modal-top">
+        <h2 id="chart-title">Saatlik sıra grafiği</h2>
+        <button class="ghost" id="chart-close" type="button">Kapat</button>
+      </div>
+      <div id="chart-wrap"></div>
+      <div class="chart-caption">Yukarı = daha iyi sıra (1 en üstte). Her nokta bir saat başıdır.</div>
+    </div>
+  </div>
+  <script>
+    const jobsEl = document.getElementById("jobs");
+    const modal = document.getElementById("chart-modal");
+    const chartWrap = document.getElementById("chart-wrap");
+    const chartTitle = document.getElementById("chart-title");
+    let lastState = { jobs: [], groups: [], products: [], keywords: [] };
+    let chartJobId = null;
+    let lastJobsHtml = "";
+    let lastChartSig = "";
+    let lastChipHtml = "";
+
+    function esc(value) {
+      return String(value ?? "").replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
+    }
+    function deltaHtml(value) {
+      if (value === null || value === undefined) return `<span class="delta flat">ilk</span>`;
+      if (value === 0) return "";
+      const sign = value > 0 ? "+" : "";
+      const cls = value < 0 ? "ok" : "bad";
+      return `<span class="delta ${cls}">${sign}${value}</span>`;
+    }
+    function posValue(value) {
+      return value === null || value === undefined ? "—" : value;
+    }
+    function badge(status) {
+      const map = {
+        running: "çalışıyor", starting: "başlıyor", stopping: "duruyor",
+        stopped: "durdu", idle: "bekliyor", error: "hata", queued: "sırada", done: "hedef"
+      };
+      return `<span class="badge ${status}">${map[status] || status}</span>`;
+    }
+    function updateKpis(state) {
+      document.getElementById("kpi-active").textContent = state.active || 0;
+      document.getElementById("kpi-queued").textContent = state.queued || 0;
+      document.getElementById("kpi-attempts").textContent = state.attempts || 0;
+      document.getElementById("kpi-success").textContent = state.success || 0;
+      document.getElementById("kpi-fail").textContent = state.fail || 0;
+    }
+    function hourHistory(job) {
+      const seen = {};
+      const out = [];
+      for (const p of job.history || []) {
+        if (!p || p.overall == null) continue;
+        let key = p.hour;
+        if (!key && p.ts) {
+          const d = new Date(Number(p.ts) * 1000);
+          key = d.getFullYear() + "-" + d.getMonth() + "-" + d.getDate() + "-" + d.getHours();
+        }
+        if (!key) key = p.label;
+        if (!key || seen[key]) continue;
+        seen[key] = true;
+        out.push(p);
+      }
+      return out;
+    }
+    function drawChart(jobId) {
+      const job = (lastState.jobs || []).find(j => j.id === jobId);
+      if (!job) return;
+      const history = hourHistory(job);
+      const sig = jobId + ":" + history.map(p => (p.hour || p.ts) + "=" + p.overall).join("|");
+      if (sig === lastChartSig) return;
+      lastChartSig = sig;
+      chartTitle.textContent = job.keyword + " · " + job.product_id + " · saatlik sıra";
+      if (!history.length) {
+        chartWrap.innerHTML = `<div class="empty">Henüz saatlik kayıt yok. İlk başarılı tıklama bu saatin noktasını oluşturur.</div>`;
+        return;
+      }
+      const rows = history.slice().reverse().map(p =>
+        `<tr><td>${esc(p.label || p.hour || "")}</td><td>${p.overall}. sıra</td><td>sayfa ${p.page || "—"} / ${p.rank || "—"}</td></tr>`
+      ).join("");
+      chartWrap.innerHTML = `
+        <div class="chart-box">
+          <canvas id="rank-canvas" width="860" height="340"></canvas>
+          <div id="chart-tip" class="chart-tip"></div>
+        </div>
+        <table class="hour-table">
+          <thead><tr><th>Saat</th><th>Sıra</th><th>Sayfa</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+      const canvas = document.getElementById("rank-canvas");
+      const tip = document.getElementById("chart-tip");
+      const ctx = canvas.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = canvas.clientWidth || 860;
+      const cssH = 340;
+      canvas.width = Math.round(cssW * dpr);
+      canvas.height = Math.round(cssH * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const pad = { t: 24, r: 16, b: 42, l: 54 };
+      const w = cssW, h = cssH;
+      const ranks = history.map(p => Number(p.overall));
+      const minR = 1;
+      const maxR = Math.max(5, ...ranks);
+      const innerW = w - pad.l - pad.r;
+      const innerH = h - pad.t - pad.b;
+      const xAt = (i) => pad.l + (history.length === 1 ? innerW / 2 : (i / (history.length - 1)) * innerW);
+      const yAt = (rank) => pad.t + ((rank - minR) / (maxR - minR)) * innerH;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#111318";
+      ctx.fillRect(0, 0, w, h);
+      const ticks = [];
+      const step = Math.max(1, Math.ceil((maxR - minR) / 4));
+      for (let v = minR; v <= maxR; v += step) ticks.push(v);
+      if (ticks[ticks.length - 1] !== maxR) ticks.push(maxR);
+      ctx.strokeStyle = "#2a2d34";
+      ctx.fillStyle = "#9aa1ad";
+      ctx.font = "12px Segoe UI";
+      ticks.forEach(v => {
+        const y = yAt(v);
+        ctx.beginPath();
+        ctx.moveTo(pad.l, y);
+        ctx.lineTo(w - pad.r, y);
+        ctx.stroke();
+        ctx.fillText(v + ". sıra", 8, y + 4);
+      });
+      ctx.beginPath();
+      history.forEach((p, i) => {
+        const x = xAt(i), y = yAt(Number(p.overall));
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.strokeStyle = "#f27a1a";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      history.forEach((p, i) => {
+        ctx.beginPath();
+        ctx.arc(xAt(i), yAt(Number(p.overall)), 5, 0, Math.PI * 2);
+        ctx.fillStyle = "#f27a1a";
+        ctx.fill();
+        ctx.strokeStyle = "#101114";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      });
+      const labelEvery = history.length > 10 ? Math.ceil(history.length / 8) : 1;
+      ctx.fillStyle = "#9aa1ad";
+      ctx.textAlign = "center";
+      history.forEach((p, i) => {
+        if (i % labelEvery !== 0 && i !== history.length - 1) return;
+        ctx.fillText((p.label || "").split(" ").pop() || "", xAt(i), h - 14);
+      });
+      canvas.onmousemove = (ev) => {
+        const rect = canvas.getBoundingClientRect();
+        const mx = ev.clientX - rect.left;
+        let best = 0, bestDist = 1e9;
+        history.forEach((_, i) => {
+          const d = Math.abs(mx - xAt(i));
+          if (d < bestDist) { bestDist = d; best = i; }
+        });
+        if (bestDist > 28) { tip.style.display = "none"; return; }
+        const p = history[best];
+        tip.style.display = "block";
+        tip.style.left = Math.min(xAt(best) + 10, w - 160) + "px";
+        tip.style.top = Math.max(8, yAt(Number(p.overall)) - 48) + "px";
+        tip.innerHTML = `<b>${esc(p.label || "")}</b><br>${p.overall}. sıra<br>sayfa ${p.page || "—"}`;
+      };
+      canvas.onmouseleave = () => { tip.style.display = "none"; };
+    }
+    function openChart(jobId) {
+      chartJobId = jobId;
+      lastChartSig = "";
+      modal.classList.add("show");
+      drawChart(jobId);
+    }
+    function closeChart() {
+      chartJobId = null;
+      lastChartSig = "";
+      modal.classList.remove("show");
+    }
+    function chipHtml(items, kind) {
+      if (!items.length) return `<span class="hint">Henüz yok</span>`;
+      return items.map(item => `
+        <span class="chip">${esc(item)}
+          <button type="button" data-del-${kind}="${esc(item)}" title="Sil">×</button>
+        </span>`).join("");
+    }
+    function renderChips(state) {
+      const html = JSON.stringify(state.products) + JSON.stringify(state.keywords) + state.target_rank + state.max_concurrent;
+      if (html === lastChipHtml) return;
+      lastChipHtml = html;
+      document.getElementById("product-chips").innerHTML = chipHtml(state.products || [], "product");
+      document.getElementById("keyword-chips").innerHTML = chipHtml(state.keywords || [], "keyword");
+      if (state.target_rank) document.getElementById("target-rank").value = state.target_rank;
+      if (state.max_concurrent) document.getElementById("max-concurrent").value = state.max_concurrent;
+    }
+    function jobsMarkup(state) {
+      const groups = state.groups || [];
+      if (!groups.length) return `<div class="empty">Önce ürün ekleyin, sonra kelimeleri dağıtın.</div>`;
+      return groups.map(group => {
+        const rows = (group.jobs || []).map(job => {
+          const busy = job.status === "running" || job.status === "starting" || job.status === "stopping";
+          return `<tr>
+            <td>${esc(job.keyword)}</td>
+            <td><span class="n">${posValue(job.overall)}</span>${deltaHtml(job.overall_delta)}</td>
+            <td>${posValue(job.best_overall)}</td>
+            <td>${job.target_rank}</td>
+            <td>${badge(job.status)}</td>
+            <td>
+              <div class="row-actions">
+                <button class="ghost" data-chart="${job.id}">Grafik</button>
+                ${busy ? `<button class="ghost" data-stop="${job.id}">Durdur</button>`
+                       : `<button class="ghost" data-start="${job.id}">${job.status === "queued" ? "Şimdi başlat" : "Başlat"}</button>`}
+                ${job.status === "queued" ? `<button class="ghost" data-stop="${job.id}">Kuyruktan çıkar</button>` : ""}
+                <button class="ghost" data-del="${job.id}">Kaldır</button>
+              </div>
+            </td>
+          </tr>`;
+        }).join("");
+        return `
+          <div class="job">
+            <div class="job-top">
+              <div>
+                <div class="pid">${esc(group.product_id)}</div>
+                <div class="job-meta">${group.jobs.length} kelime · ${group.running} çalışıyor · ${group.queued} sırada · ${group.done} hedefte</div>
+              </div>
+              <div class="actions">
+                <button data-product-start="${esc(group.product_id)}">Bu ürünü çalıştır</button>
+                <button class="ghost" data-product-stop="${esc(group.product_id)}">Durdur</button>
+                <button class="ghost" data-product-del="${esc(group.product_id)}">Ürünü sil</button>
+              </div>
+            </div>
+            ${group.jobs.length ? `<table class="kw">
+              <thead><tr><th>Kelime</th><th>Sıra</th><th>En iyi</th><th>Hedef</th><th>Durum</th><th></th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>` : `<div class="empty">Bu ürüne henüz kelime dağıtılmadı.</div>`}
+          </div>`;
+      }).join("");
+    }
+    function render(state) {
+      updateKpis(state);
+      renderChips(state);
+      const html = jobsMarkup(state);
+      if (html !== lastJobsHtml) {
+        jobsEl.innerHTML = html;
+        lastJobsHtml = html;
+      }
+    }
+    async function refresh() {
+      const res = await fetch("/api/state");
+      lastState = await res.json();
+      if (!chartJobId) render(lastState);
+      else {
+        updateKpis(lastState);
+        drawChart(chartJobId);
+      }
+    }
+    async function post(url, body) {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) alert(data.error || "İşlem başarısız");
+      return data;
+    }
+    document.getElementById("product-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = document.getElementById("product-text").value;
+      await post("/api/products", { text });
+      document.getElementById("product-text").value = "";
+      lastChipHtml = ""; lastJobsHtml = "";
+      refresh();
+    });
+    document.getElementById("keyword-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = document.getElementById("keyword-text").value;
+      await post("/api/keywords", { text });
+      document.getElementById("keyword-text").value = "";
+      lastChipHtml = ""; lastJobsHtml = "";
+      refresh();
+    });
+    document.getElementById("assign-btn").addEventListener("click", async () => {
+      await post("/api/assign", {});
+      lastJobsHtml = "";
+      refresh();
+    });
+    document.getElementById("settings-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      await post("/api/settings", {
+        target_rank: Number(document.getElementById("target-rank").value),
+        max_concurrent: Number(document.getElementById("max-concurrent").value),
+      });
+      lastChipHtml = ""; lastJobsHtml = "";
+      refresh();
+    });
+    document.getElementById("product-chips").addEventListener("click", async (e) => {
+      const id = e.target.dataset.delProduct;
+      if (!id) return;
+      await fetch("/api/products/" + encodeURIComponent(id), { method: "DELETE" });
+      lastChipHtml = ""; lastJobsHtml = "";
+      refresh();
+    });
+    document.getElementById("keyword-chips").addEventListener("click", async (e) => {
+      const keyword = e.target.dataset.delKeyword;
+      if (!keyword) return;
+      await fetch("/api/keywords", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keyword }),
+      });
+      lastChipHtml = ""; lastJobsHtml = "";
+      refresh();
+    });
+    jobsEl.addEventListener("click", async (e) => {
+      const t = e.target;
+      if (t.dataset.chart) { openChart(t.dataset.chart); return; }
+      if (t.dataset.stop) await fetch("/api/jobs/" + t.dataset.stop + "/stop", { method: "POST" });
+      if (t.dataset.start) await fetch("/api/jobs/" + t.dataset.start + "/start", { method: "POST" });
+      if (t.dataset.del) await fetch("/api/jobs/" + t.dataset.del, { method: "DELETE" });
+      if (t.dataset.productStart) await fetch("/api/products/" + encodeURIComponent(t.dataset.productStart) + "/start", { method: "POST" });
+      if (t.dataset.productStop) await fetch("/api/products/" + encodeURIComponent(t.dataset.productStop) + "/stop", { method: "POST" });
+      if (t.dataset.productDel) await fetch("/api/products/" + encodeURIComponent(t.dataset.productDel), { method: "DELETE" });
+      if (t.dataset.stop || t.dataset.start || t.dataset.del || t.dataset.productStart || t.dataset.productStop || t.dataset.productDel) {
+        lastJobsHtml = "";
+        refresh();
+      }
+    });
+    document.getElementById("chart-close").addEventListener("click", closeChart);
+    modal.addEventListener("click", (e) => { if (e.target === modal) closeChart(); });
+    refresh();
+    setInterval(refresh, 1000);
+  </script>
+</body>
+</html>
