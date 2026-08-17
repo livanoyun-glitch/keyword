@@ -541,18 +541,20 @@
       refresh();
     });
     jobsEl.addEventListener("click", async (e) => {
-      const t = e.target;
-      if (t.dataset.chart) { openChart(t.dataset.chart); return; }
-      if (t.dataset.stop) await fetch("/api/jobs/" + t.dataset.stop + "/stop", { method: "POST" });
-      if (t.dataset.start) await fetch("/api/jobs/" + t.dataset.start + "/start", { method: "POST" });
-      if (t.dataset.del) await fetch("/api/jobs/" + t.dataset.del, { method: "DELETE" });
-      if (t.dataset.productStart) await fetch("/api/products/" + encodeURIComponent(t.dataset.productStart) + "/start", { method: "POST" });
-      if (t.dataset.productStop) await fetch("/api/products/" + encodeURIComponent(t.dataset.productStop) + "/stop", { method: "POST" });
-      if (t.dataset.productDel) await fetch("/api/products/" + encodeURIComponent(t.dataset.productDel), { method: "DELETE" });
-      if (t.dataset.stop || t.dataset.start || t.dataset.del || t.dataset.productStart || t.dataset.productStop || t.dataset.productDel) {
+      const t = e.target.closest("[data-chart], [data-stop], [data-start], [data-del], [data-product-start], [data-product-stop], [data-product-del]");
+      if (!t) return;
+      try {
+        setStatus("İşleniyor...");
+        if (t.dataset.chart) { openChart(t.dataset.chart); return; }
+        if (t.dataset.stop) await api("/api/jobs/" + t.dataset.stop + "/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        if (t.dataset.start) await api("/api/jobs/" + t.dataset.start + "/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        if (t.dataset.del) await api("/api/jobs/" + t.dataset.del, { method: "DELETE" });
+        if (t.dataset.productStart) await api("/api/products/" + encodeURIComponent(t.dataset.productStart) + "/start", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        if (t.dataset.productStop) await api("/api/products/" + encodeURIComponent(t.dataset.productStop) + "/stop", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
+        if (t.dataset.productDel) await api("/api/products/" + encodeURIComponent(t.dataset.productDel), { method: "DELETE" });
         lastJobsHtml = "";
-        refresh();
-      }
+        await refresh();
+      } catch (err) {}
     });
     document.getElementById("chart-close").addEventListener("click", closeChart);
     modal.addEventListener("click", (e) => { if (e.target === modal) closeChart(); });

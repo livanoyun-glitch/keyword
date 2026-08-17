@@ -319,12 +319,10 @@ def maybe_start_queued_locked() -> None:
     ]
     if not enabled:
         return
-    while running_count() < MAX_CONCURRENT:
-        job = min(enabled, key=lambda item: len(job_workers(item)))
-        before = running_count()
+    need = max(0, MAX_CONCURRENT - running_count())
+    for _ in range(need):
+        job = min(enabled, key=lambda item: len(job.get("threads") or []))
         spawn_worker(job)
-        if running_count() <= before:
-            break
 
 
 def save_product_image(product_id: str, image_url: str) -> None:
@@ -522,7 +520,13 @@ def start_job(job_id: str) -> dict:
             job["stats"]["status"] = "queued"
         persist_jobs_locked()
         maybe_start_queued_locked()
-        return public_job(job)
+        payload = public_job(job)
+    print(
+        f"Start {job['keyword']} / {job['product_id']}: "
+        f"{payload.get('workers') or 0} tarayıcı, durum={payload.get('status')}",
+        flush=True,
+    )
+    return payload
 
 
 def start_product(product_id: str) -> int:
@@ -724,7 +728,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         path = urlparse(self.path).path.rstrip("/")
         try:
-            data = self._read_json() if path.startswith("/api/") else {}
+            needs_body = path in {
+                "/api/products",
+                "/api/keywords",
+                "/api/settings",
+                "/api/jobs",
+            }
+            data = self._read_json() if needs_body else {}
             if path == "/api/products":
                 ids = add_products(data.get("text") or data.get("product_id") or "")
                 self._json(201, {"ok": True, "product_ids": ids})
