@@ -26,13 +26,16 @@
     "oyuncu parmaklık"
   ],
   "target_rank": 1,
-  "max_concurrent": 10,
+  "max_concurrent": 8,
+  "images": {
+    "674516305": "https://cdn.dsmcdn.com/ty1845/prod/QC_ENRICHMENT/20260329/17/db6ea07d-c37b-3f28-9657-760f7608deb3/1_org_zoom.jpg"
+  },
   "jobs": [
     {
       "id": "5e22e4b6",
       "keyword": "parmak eldiven",
       "product_id": "674516305",
-      "enabled": true,
+      "enabled": false,
       "best_overall": 47,
       "target_rank": 1
     },
@@ -40,7 +43,7 @@
       "id": "a81da05f",
       "keyword": "parmak eldiveni",
       "product_id": "674516305",
-      "enabled": true,
+      "enabled": false,
       "best_overall": 20,
       "target_rank": 1
     },
@@ -48,7 +51,7 @@
       "id": "0add5fc3",
       "keyword": "pubg mobile parmaklık",
       "product_id": "674516305",
-      "enabled": true,
+      "enabled": false,
       "best_overall": 20,
       "target_rank": 1
     },
@@ -56,7 +59,7 @@
       "id": "ffa0e424",
       "keyword": "oyuncu eldiveni",
       "product_id": "674516305",
-      "enabled": true,
+      "enabled": false,
       "best_overall": 20,
       "target_rank": 1
     },
@@ -64,7 +67,7 @@
       "id": "2ee57c0a",
       "keyword": "oyun parmaklığı",
       "product_id": "674516305",
-      "enabled": true,
+      "enabled": false,
       "best_overall": 55,
       "target_rank": 1
     },
@@ -80,7 +83,7 @@
       "id": "ecb9fc8a",
       "keyword": "pubg parmaklık",
       "product_id": "674516305",
-      "enabled": true,
+      "enabled": false,
       "best_overall": 35,
       "target_rank": 1
     },
@@ -88,7 +91,7 @@
       "id": "4d9d42c0",
       "keyword": "oyuncu parmaklığı",
       "product_id": "674516305",
-      "enabled": true,
+      "enabled": false,
       "best_overall": 31,
       "target_rank": 1
     },
@@ -96,7 +99,7 @@
       "id": "4c9eb72f",
       "keyword": "oyuncu parmaklık",
       "product_id": "674516305",
-      "enabled": true,
+      "enabled": false,
       "best_overall": 20,
       "target_rank": 1
     },
@@ -104,15 +107,15 @@
       "id": "c8267a88",
       "keyword": "parmak eldiven",
       "product_id": "817896706",
-      "enabled": true,
-      "best_overall": null,
+      "enabled": false,
+      "best_overall": 2,
       "target_rank": 1
     },
     {
       "id": "7d841501",
       "keyword": "parmak eldiveni",
       "product_id": "817896706",
-      "enabled": true,
+      "enabled": false,
       "best_overall": 32,
       "target_rank": 1
     },
@@ -120,7 +123,7 @@
       "id": "3e8efa75",
       "keyword": "pubg mobile parmaklık",
       "product_id": "817896706",
-      "enabled": true,
+      "enabled": false,
       "best_overall": 19,
       "target_rank": 1
     },
@@ -128,7 +131,7 @@
       "id": "4e75e8b2",
       "keyword": "oyuncu eldiveni",
       "product_id": "817896706",
-      "enabled": true,
+      "enabled": false,
       "best_overall": 25,
       "target_rank": 1
     },
@@ -136,7 +139,7 @@
       "id": "bb31eed5",
       "keyword": "oyun parmaklığı",
       "product_id": "817896706",
-      "enabled": true,
+      "enabled": false,
       "best_overall": 22,
       "target_rank": 1
     },
@@ -144,7 +147,7 @@
       "id": "4e029642",
       "keyword": "parmaklık",
       "product_id": "817896706",
-      "enabled": true,
+      "enabled": false,
       "best_overall": null,
       "target_rank": 1
     },
@@ -152,7 +155,7 @@
       "id": "717054a3",
       "keyword": "pubg parmaklık",
       "product_id": "817896706",
-      "enabled": true,
+      "enabled": false,
       "best_overall": null,
       "target_rank": 1
     },
@@ -160,7 +163,7 @@
       "id": "71d249d9",
       "keyword": "oyuncu parmaklığı",
       "product_id": "817896706",
-      "enabled": true,
+      "enabled": false,
       "best_overall": null,
       "target_rank": 1
     },
@@ -168,7 +171,7 @@
       "id": "1d323a84",
       "keyword": "oyuncu parmaklık",
       "product_id": "817896706",
-      "enabled": true,
+      "enabled": false,
       "best_overall": null,
       "target_rank": 1
     },

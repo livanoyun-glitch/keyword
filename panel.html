@@ -51,6 +51,11 @@
     .job { padding: 16px 18px; }
     .job-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; margin-bottom: 12px; }
     .pid { font-size: 18px; font-weight: 700; font-family: Consolas, monospace; }
+    .job-head { display: flex; gap: 12px; align-items: center; }
+    .thumb {
+      width: 72px; height: 72px; object-fit: cover; flex-shrink: 0;
+      border-radius: 10px; background: #111318; border: 1px solid var(--line);
+    }
     .job-meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
     .badge { font-size: 11px; font-weight: 700; padding: 4px 8px; border-radius: 999px; text-transform: uppercase; }
     .running { background: #163326; color: var(--ok); }
@@ -63,7 +68,7 @@
     table.kw { width: 100%; border-collapse: collapse; font-size: 13px; }
     table.kw th, table.kw td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); vertical-align: middle; }
     table.kw th { color: var(--muted); font-weight: 600; font-size: 12px; }
-    table.kw .n { font-size: 16px; font-weight: 700; }
+    table.kw .err { color: var(--bad); font-size: 12px; max-width: 280px; }
     .delta { font-size: 13px; font-weight: 700; margin-left: 6px; }
     .delta.flat { color: var(--muted); font-weight: 600; }
     .row-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
@@ -139,7 +144,7 @@
           <label>Aynı anda çalışan tarayıcı</label>
           <input id="max-concurrent" type="number" min="1" max="50" value="2">
         </div>
-        <p class="hint" style="margin:0">1–50 tarayıcı. Hedefe gelen kelime durur; boşalan yerde sıradaki başlar.</p>
+        <p class="hint" style="margin:0">8 GB RAM için 8 tarayıcı. Hedefe gelen kelime durur; boşalan yerde sıradaki başlar.</p>
         <button type="submit">Ayarları kaydet</button>
       </form>
       <div class="actions" style="margin-top:12px; justify-content:flex-start">
@@ -352,7 +357,9 @@
             <td><span class="n">${posValue(job.overall)}</span>${deltaHtml(job.overall_delta)}</td>
             <td>${posValue(job.best_overall)}</td>
             <td>${job.target_rank}</td>
-            <td>${badge(job.status)}</td>
+            <td>${job.success}/${job.attempts}</td>
+            <td>${badge(job.status)}${job.workers ? ` · ${job.workers} tarayıcı` : ""}</td>
+            <td class="err">${job.last_error ? esc(job.last_error) : (job.fail ? job.fail + " hata (son mesaj yok)" : "")}</td>
             <td>
               <div class="row-actions">
                 <button class="ghost" data-chart="${job.id}">Grafik</button>
@@ -367,9 +374,14 @@
         return `
           <div class="job">
             <div class="job-top">
-              <div>
-                <div class="pid">${esc(group.product_id)}</div>
-                <div class="job-meta">${group.jobs.length} kelime · ${group.running} çalışıyor · ${group.queued} sırada · ${group.done} hedefte</div>
+              <div class="job-head">
+                ${group.image_url
+                  ? `<img class="thumb" src="${esc(group.image_url)}" alt="" referrerpolicy="no-referrer">`
+                  : `<div class="thumb"></div>`}
+                <div>
+                  <div class="pid">${esc(group.product_id)}</div>
+                  <div class="job-meta">${group.jobs.length} kelime · ${group.running} çalışıyor · ${group.queued} sırada · ${group.done} hedefte</div>
+                </div>
               </div>
               <div class="actions">
                 <button data-product-start="${esc(group.product_id)}">Bu ürünü çalıştır</button>
@@ -378,7 +390,7 @@
               </div>
             </div>
             ${group.jobs.length ? `<table class="kw">
-              <thead><tr><th>Kelime</th><th>Sıra</th><th>En iyi</th><th>Hedef</th><th>Durum</th><th></th></tr></thead>
+              <thead><tr><th>Kelime</th><th>Sıra</th><th>En iyi</th><th>Hedef</th><th>Başarı</th><th>Durum</th><th>Son hata</th><th></th></tr></thead>
               <tbody>${rows}</tbody>
             </table>` : `<div class="empty">Bu ürüne henüz kelime dağıtılmadı.</div>`}
           </div>`;

@@ -1,0 +1,19 @@
+services:
+  panel:
+    build: .
+    restart: unless-stopped
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8765"
+      DATA_DIR: /app/data
+      OPEN_BROWSER: "0"
+      PLAYWRIGHT_DOCKER: "1"
+    expose:
+      - "8765"
+    volumes:
+      - panel-data:/app/data
+    shm_size: "2gb"
+    init: true
+
+volumes:
+  panel-data:

@@ -27,7 +27,7 @@ DEFAULT_JOBS = [
     {"keyword": "parmak eldiveni", "product_id": "817896706"},
 ]
 DEFAULT_TARGET_RANK = 10
-DEFAULT_MAX_CONCURRENT = 2
+DEFAULT_MAX_CONCURRENT = 8
 MAX_CONCURRENT_LIMIT = 50
 PRODUCT_IN_TEXT = re.compile(r"-p-(\d+)")
 
@@ -36,6 +36,7 @@ PRODUCTS: list[str] = []
 KEYWORDS: list[str] = []
 TARGET_RANK = DEFAULT_TARGET_RANK
 MAX_CONCURRENT = DEFAULT_MAX_CONCURRENT
+PRODUCT_IMAGES: dict[str, str] = {}
 LOCK = threading.Lock()
 HISTORY_LOCK = threading.Lock()
 JOBS_FILE_LOCK = threading.Lock()
@@ -113,6 +114,7 @@ def snapshot_state() -> dict:
         "keywords": list(KEYWORDS),
         "target_rank": TARGET_RANK,
         "max_concurrent": MAX_CONCURRENT,
+        "images": dict(PRODUCT_IMAGES),
         "jobs": [
             {
                 "id": job["id"],
@@ -160,9 +162,22 @@ def load_saved_state() -> dict | None:
     return None
 
 
+def job_workers(job: dict) -> list:
+    threads = [thread for thread in (job.get("threads") or []) if thread.is_alive()]
+    job["threads"] = threads
+    if threads:
+        job["thread"] = threads[-1]
+    else:
+        job["thread"] = None
+    return threads
+
+
 def job_thread_alive(job: dict) -> bool:
-    thread = job.get("thread")
-    return thread is not None and thread.is_alive()
+    return bool(job_workers(job))
+
+
+def running_count() -> int:
+    return sum(len(job_workers(job)) for job in JOBS.values())
 
 
 def empty_stats() -> dict:
@@ -228,7 +243,19 @@ def public_job(job: dict) -> dict:
         "overall_delta": stats.get("overall_delta"),
         "best_overall": stats.get("best_overall"),
         "target_rank": int(stats.get("target_rank") or TARGET_RANK),
+        "workers": len(job_workers(job)),
         "history": normalize_hourly_history(stats.get("history") or []),
+    }
+
+
+def product_group(product_id: str, product_jobs: list) -> dict:
+    return {
+        "product_id": product_id,
+        "image_url": PRODUCT_IMAGES.get(product_id, ""),
+        "jobs": product_jobs,
+        "running": sum(int(job.get("workers") or 0) for job in product_jobs),
+        "queued": sum(1 for job in product_jobs if job["status"] == "queued"),
+        "done": sum(1 for job in product_jobs if job["status"] == "done"),
     }
 
 
@@ -236,19 +263,11 @@ def public_state() -> dict:
     jobs = [public_job(job) for job in JOBS.values()]
     grouped = []
     for product_id in PRODUCTS:
-        product_jobs = [job for job in jobs if job["product_id"] == product_id]
         grouped.append(
-            {
-                "product_id": product_id,
-                "jobs": product_jobs,
-                "running": sum(
-                    1
-                    for job in product_jobs
-                    if job["status"] in {"running", "starting", "stopping"}
-                ),
-                "queued": sum(1 for job in product_jobs if job["status"] == "queued"),
-                "done": sum(1 for job in product_jobs if job["status"] == "done"),
-            }
+            product_group(
+                product_id,
+                [job for job in jobs if job["product_id"] == product_id],
+            )
         )
     extra = [job for job in jobs if job["product_id"] not in PRODUCTS]
     if extra:
@@ -256,19 +275,7 @@ def public_state() -> dict:
         for job in extra:
             by_product.setdefault(job["product_id"], []).append(job)
         for product_id, product_jobs in by_product.items():
-            grouped.append(
-                {
-                    "product_id": product_id,
-                    "jobs": product_jobs,
-                    "running": sum(
-                        1
-                        for job in product_jobs
-                        if job["status"] in {"running", "starting", "stopping"}
-                    ),
-                    "queued": sum(1 for job in product_jobs if job["status"] == "queued"),
-                    "done": sum(1 for job in product_jobs if job["status"] == "done"),
-                }
-            )
+            grouped.append(product_group(product_id, product_jobs))
     return {
         "products": list(PRODUCTS),
         "keywords": list(KEYWORDS),
@@ -276,7 +283,7 @@ def public_state() -> dict:
         "max_concurrent": MAX_CONCURRENT,
         "jobs": jobs,
         "groups": grouped,
-        "active": sum(1 for job in jobs if job["status"] in {"running", "starting"}),
+        "active": sum(int(job.get("workers") or 0) for job in jobs),
         "queued": sum(1 for job in jobs if job["status"] == "queued"),
         "attempts": sum(job["attempts"] for job in jobs),
         "success": sum(job["success"] for job in jobs),
@@ -289,26 +296,33 @@ def running_count() -> int:
 
 
 def maybe_start_queued_locked() -> None:
-    slots = max(0, MAX_CONCURRENT - running_count())
-    if slots <= 0:
-        return
-    waiting = [
+    enabled = [
         job
         for job in JOBS.values()
-        if job.get("enabled")
-        and not job_thread_alive(job)
-        and job["stats"].get("status") != "done"
+        if job.get("enabled") and job["stats"].get("status") != "done"
     ]
-    waiting.sort(key=lambda job: -(int(job["stats"].get("overall") or 10**9)))
-    for job in waiting[:slots]:
-        start_job_thread(job)
-
-
-def start_job_thread(job: dict) -> None:
-    if job_thread_alive(job):
+    if not enabled:
         return
+    while running_count() < MAX_CONCURRENT:
+        job = min(enabled, key=lambda item: len(job_workers(item)))
+        spawn_worker(job)
+
+
+def save_product_image(product_id: str, image_url: str) -> None:
+    product_id = normalize_product_id(product_id)
+    if not product_id or not image_url:
+        return
+    with LOCK:
+        if PRODUCT_IMAGES.get(product_id) == image_url:
+            return
+        PRODUCT_IMAGES[product_id] = image_url
+        persist_jobs_locked()
+
+
+def spawn_worker(job: dict) -> None:
     job["enabled"] = True
-    job["stop"].clear()
+    if not job_thread_alive(job):
+        job["stop"].clear()
     job["stats"]["status"] = "starting"
     job["stats"]["started_at"] = time.time()
     job["stats"]["target_rank"] = TARGET_RANK
@@ -323,6 +337,7 @@ def start_job_thread(job: dict) -> None:
                 on_history=lambda history: save_job_history(
                     job["keyword"], job["product_id"], history
                 ),
+                on_image=lambda url: save_product_image(job["product_id"], url),
             )
         except Exception as exc:
             job["stats"]["status"] = "error"
@@ -331,10 +346,12 @@ def start_job_thread(job: dict) -> None:
             with LOCK:
                 if job["stats"].get("status") == "done":
                     job["enabled"] = False
+                    job["stop"].set()
                 persist_jobs_locked()
                 maybe_start_queued_locked()
 
     thread = threading.Thread(target=worker, name=f"job-{job['id']}", daemon=True)
+    job.setdefault("threads", []).append(thread)
     job["thread"] = thread
     thread.start()
 
@@ -382,6 +399,7 @@ def add_job(
             "stats": empty_stats(),
             "stop": threading.Event(),
             "thread": None,
+            "threads": [],
         }
         job["stats"]["history"] = history
         job["stats"]["best_overall"] = best_from_history(history)
@@ -443,6 +461,7 @@ def assign_keywords(product_ids: list[str] | None = None, keywords: list[str] | 
                     "stats": empty_stats(),
                     "stop": threading.Event(),
                     "thread": None,
+                    "threads": [],
                 }
                 job["stats"]["history"] = history
                 job["stats"]["best_overall"] = best_from_history(history)
@@ -479,9 +498,8 @@ def start_job(job_id: str) -> dict:
         job["enabled"] = True
         if job["stats"].get("status") == "done":
             job["stats"]["status"] = "queued"
-        if running_count() < MAX_CONCURRENT:
-            start_job_thread(job)
         persist_jobs_locked()
+        maybe_start_queued_locked()
         return public_job(job)
 
 
@@ -537,6 +555,7 @@ def delete_product(product_id: str) -> None:
     with LOCK:
         if product_id in PRODUCTS:
             PRODUCTS.remove(product_id)
+        PRODUCT_IMAGES.pop(product_id, None)
         for job in list(JOBS.values()):
             if job["product_id"] != product_id:
                 continue
@@ -597,6 +616,10 @@ def restore_jobs() -> None:
         KEYWORDS[:] = unique_keep_order(
             [str(item).strip() for item in saved.get("keywords") or [] if str(item).strip()]
         )
+        for pid, url in (saved.get("images") or {}).items():
+            pid = normalize_product_id(str(pid))
+            if pid and url:
+                PRODUCT_IMAGES[pid] = str(url)
     for item in saved.get("jobs") or []:
         keyword = str(item.get("keyword") or "").strip()
         product_id = str(item.get("product_id") or "")

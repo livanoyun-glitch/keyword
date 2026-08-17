@@ -51,7 +51,7 @@ PRODUCT_CARD_SELECTORS = [
     "[data-testid='product-card'] a[href*='-p-']",
     "a[href*='-p-']:not([href*='sepet'])",
 ]
-MAX_SEARCH_PAGES = 10
+MAX_SEARCH_PAGES = 30
 PAGE_SIZE = 24
 ISTANBUL_TZ = ZoneInfo("Europe/Istanbul")
 HOURLY_HISTORY_LIMIT = 168
@@ -133,8 +133,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def search_url(keyword: str) -> str:
-    return f"{TRENDYOL_HOME}sr?q={quote_plus(keyword)}"
+def search_url(keyword: str, page_index: int = 1) -> str:
+    url = f"{TRENDYOL_HOME}sr?q={quote_plus(keyword)}"
+    if page_index > 1:
+        url += f"&pi={page_index}"
+    return url
 
 
 def normalize_product_id(value: str) -> str:
@@ -310,25 +313,45 @@ def find_product_in_results(
     product_id: str,
 ) -> tuple[Locator, int, int, int]:
     href_pattern = product_id_href_pattern(product_id)
-    links = page.locator(f"a[href*='-p-{product_id}']")
 
-    try:
-        page.locator("a[href*='-p-']").first.wait_for(state="attached", timeout=8000)
-    except PlaywrightTimeoutError:
-        pass
+    for page_index in range(1, MAX_SEARCH_PAGES + 1):
+        if page_index > 1:
+            page.goto(
+                search_url(keyword, page_index),
+                wait_until="domcontentloaded",
+                timeout=20000,
+            )
+            dismiss_overlays(page)
 
-    for _ in range(16):
-        count = links.count()
-        for i in range(count):
-            href = links.nth(i).get_attribute("href") or ""
-            if href_pattern.search(href):
-                overall, listing_page, rank = rank_from_listing(page, product_id)
-                return links.nth(i), listing_page, rank, overall
-        page.mouse.wheel(0, 1800)
-        page.wait_for_timeout(250)
+        try:
+            page.locator("a[href*='-p-']").first.wait_for(state="attached", timeout=8000)
+        except PlaywrightTimeoutError:
+            if page_index == 1:
+                continue
+            break
+
+        links = page.locator(f"a[href*='-p-{product_id}']")
+        for _ in range(12):
+            count = links.count()
+            for i in range(count):
+                href = links.nth(i).get_attribute("href") or ""
+                if not href_pattern.search(href):
+                    continue
+                ids = unique_listing_ids(page)
+                if product_id in ids:
+                    on_page = ids.index(product_id) + 1
+                else:
+                    on_page = 1
+                overall = (page_index - 1) * PAGE_SIZE + on_page
+                return links.nth(i), page_index, on_page, overall
+            page.mouse.wheel(0, 1800)
+            page.wait_for_timeout(200)
+
+        if page.locator("a[href*='-p-']").count() == 0:
+            break
 
     raise RuntimeError(
-        f"Ürün kodu {product_id} arama sonuçlarında bulunamadı."
+        f"Ürün kodu {product_id} ilk {MAX_SEARCH_PAGES} sayfada bulunamadı."
     )
 
 
@@ -377,6 +400,43 @@ def pick_product(
     if index > total:
         raise RuntimeError(f"Sadece {total} ürün bulundu, {index}. ürün açılamaz.")
     return links.nth(index - 1)
+
+
+def extract_product_image(page: Page, card: Locator | None = None) -> str:
+    if card is not None:
+        try:
+            src = card.evaluate(
+                """el => {
+                  const root = el.closest('.p-card-wrppr, .p-card-chldrn-cntnr, article') || el;
+                  const img = root.querySelector('img');
+                  if (!img) return '';
+                  return img.getAttribute('src')
+                    || img.getAttribute('data-src')
+                    || (img.currentSrc || '');
+                }"""
+            )
+            if src and str(src).startswith("http"):
+                return str(src).split("?")[0]
+            if src and str(src).startswith("//"):
+                return "https:" + str(src).split("?")[0]
+        except Exception:
+            pass
+    try:
+        src = page.evaluate(
+            """() => {
+              const og = document.querySelector('meta[property="og:image"]');
+              if (og && og.content) return og.content;
+              const img = document.querySelector('img[src*="cdn.dsmcdn.com"]');
+              return img ? (img.getAttribute('src') || '') : '';
+            }"""
+        )
+        if src and str(src).startswith("//"):
+            return "https:" + str(src)
+        if src and str(src).startswith("http"):
+            return str(src)
+    except Exception:
+        pass
+    return ""
 
 
 def open_product(page: Page, card: Locator, product_id: str = "") -> Page:
@@ -442,7 +502,7 @@ def run_once(
     product: str,
     index: int,
     from_home: bool,
-) -> tuple[Page, int, int, int]:
+) -> tuple[Page, int, int, int, str]:
     page.goto(TRENDYOL_HOME, wait_until="domcontentloaded", timeout=20000)
     dismiss_overlays(page)
 
@@ -470,7 +530,8 @@ def run_once(
         raise RuntimeError(
             f"Açılan sayfa ürün kodu {product_id} ile eşleşmiyor: {page.url}"
         )
-    return page, listing_page, rank, overall
+    image_url = extract_product_image(page, card)
+    return page, listing_page, rank, overall, image_url
 
 
 def run_job_loop(
@@ -481,6 +542,7 @@ def run_job_loop(
     headed: bool = False,
     from_home: bool = False,
     on_history=None,
+    on_image=None,
 ) -> None:
     keyword = keyword.strip()
     product_id = normalize_product_id(product_id)
@@ -509,7 +571,7 @@ def run_job_loop(
                 stats["attempts"] = int(stats.get("attempts", 0)) + 1
                 started = time.perf_counter()
                 try:
-                    page, listing_page, rank, overall = run_once(
+                    page, listing_page, rank, overall, image_url = run_once(
                         page,
                         keyword=keyword,
                         product_id=product_id,
@@ -538,8 +600,9 @@ def run_job_loop(
                         stats["best_overall"] = overall
                     if record_hourly_rank(stats, overall, listing_page, rank) and on_history:
                         on_history(list(stats.get("history") or []))
+                    if image_url and on_image:
+                        on_image(image_url)
                     stats["last_url"] = page.url
-                    stats["last_error"] = ""
                     target = int(stats.get("target_rank") or 0)
                     reached_target = target > 0 and overall <= target
                     if reached_target:
@@ -620,7 +683,7 @@ def run(
                 attempt = completed + 1
                 started = time.perf_counter()
                 try:
-                    page, listing_page, rank, overall = run_once(
+                    page, listing_page, rank, overall, image_url = run_once(
                         page,
                         keyword=keyword,
                         product_id=product_id,
