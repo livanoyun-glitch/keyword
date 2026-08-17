@@ -568,6 +568,7 @@ def run_job_loop(
     from_home: bool = False,
     on_history=None,
     on_image=None,
+    should_continue=None,
 ) -> None:
     keyword = keyword.strip()
     product_id = normalize_product_id(product_id)
@@ -646,6 +647,10 @@ def run_job_loop(
                         pass
                     page = new_page(context)
                 stats["last_duration"] = round(time.perf_counter() - started, 2)
+                # Başka job'lar sırasını bekliyorsa (MAX_CONCURRENT dolu) slotu hemen
+                # bırak; aksi halde eskisi gibi bir sonraki tura kadar bekle.
+                if should_continue is not None and not should_continue():
+                    break
                 if CHECK_INTERVAL_SECONDS > 0:
                     stop_event.wait(CHECK_INTERVAL_SECONDS)
         finally:

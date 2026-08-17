@@ -13,7 +13,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
-from trendyol_search import normalize_hourly_history, normalize_product_id, run_job_loop
+from trendyol_search import (
+    CHECK_INTERVAL_SECONDS,
+    normalize_hourly_history,
+    normalize_product_id,
+    run_job_loop,
+)
 
 HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8765"))
@@ -292,17 +297,37 @@ def public_state() -> dict:
 
 
 def maybe_start_queued_locked() -> None:
+    now = time.time()
     enabled = [
         job
         for job in JOBS.values()
         if job.get("enabled")
         and job["stats"].get("status") != "done"
         and not job_thread_alive(job)
+        and (now - float(job["stats"].get("started_at") or 0)) >= CHECK_INTERVAL_SECONDS
     ]
+    # En uzun süredir tur atmamış (ya da hiç başlamamış) job'u öncelikle başlat:
+    # MAX_CONCURRENT'i aşan kombinasyonlarda job'lar sırayla döner, tek bir job
+    # slotu sonsuza kadar tutmaz.
     while enabled and running_count() < MAX_CONCURRENT:
-        job = min(enabled, key=lambda item: len(job_workers(item)))
+        job = min(enabled, key=lambda item: item["stats"].get("started_at") or 0)
         spawn_worker(job)
         enabled.remove(job)
+
+
+def others_waiting(current_job: dict) -> bool:
+    """Sırasını bekleyen (enabled, boşta, turu gelmiş) başka job var mı?
+    (worker thread'inden, LOCK tutulmadan çağrılır; kendi kilidini kendi alır.)"""
+    now = time.time()
+    with LOCK:
+        return any(
+            job is not current_job
+            and job.get("enabled")
+            and job["stats"].get("status") != "done"
+            and not job_thread_alive(job)
+            and (now - float(job["stats"].get("started_at") or 0)) >= CHECK_INTERVAL_SECONDS
+            for job in JOBS.values()
+        )
 
 
 def save_product_image(product_id: str, image_url: str) -> None:
@@ -335,6 +360,7 @@ def spawn_worker(job: dict) -> None:
                     job["keyword"], job["product_id"], history
                 ),
                 on_image=lambda url: save_product_image(job["product_id"], url),
+                should_continue=lambda: not others_waiting(job),
             )
         except Exception as exc:
             job["stats"]["status"] = "error"
@@ -745,8 +771,20 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": str(exc)})
 
 
+def scheduler_loop() -> None:
+    """MAX_CONCURRENT'i aşan job sayısında sırayla dönüşü sürdürür: periyodik
+    olarak turu gelmiş bekleyen job var mı diye bakar ve varsa başlatır.
+    (spawn_worker/stop_job zaten bunu tetikliyor; bu thread sadece hiçbir
+    HTTP isteği gelmediği sürelerde de rotasyonun devam etmesini sağlar.)"""
+    while True:
+        time.sleep(15)
+        with LOCK:
+            maybe_start_queued_locked()
+
+
 def main() -> None:
     restore_jobs()
+    threading.Thread(target=scheduler_loop, daemon=True).start()
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     url = f"http://{HOST}:{PORT}"
     print(f"Panel: {url}", flush=True)
