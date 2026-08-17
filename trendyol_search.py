@@ -55,6 +55,11 @@ MAX_SEARCH_PAGES = 30
 PAGE_SIZE = 24
 ISTANBUL_TZ = ZoneInfo("Europe/Istanbul")
 HOURLY_HISTORY_LIMIT = 168
+# Bir job'un art arda iki tarama turu arasında bekleyeceği süre (saniye).
+# Sıralama geçmişi zaten saatlik tutulduğu için (record_hourly_rank) daha sık
+# taramak gereksiz trafik/istek üretir ve bot koruması tarafından yakalanma
+# riskini artırır. 0 verilirse eski (bekleme yok) davranışa döner.
+CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "1800"))
 
 LISTING_IDS_JS = """() => {
   const collect = (nodes) => {
@@ -474,6 +479,25 @@ def search_from_homepage(page: Page, keyword: str) -> None:
     page.wait_for_url(re.compile(r"/sr"), timeout=15000)
 
 
+def build_proxy_config() -> dict[str, str] | None:
+    """PROXY_SERVER / PROXY_USERNAME / PROXY_PASSWORD env değişkenlerinden
+    Playwright'ın beklediği proxy sözlüğünü üretir. PROXY_SERVER boşsa proxy
+    kullanılmaz (eski davranış)."""
+    server = (os.environ.get("PROXY_SERVER") or "").strip()
+    if not server:
+        return None
+    if "://" not in server:
+        server = f"http://{server}"
+    config: dict[str, str] = {"server": server}
+    username = os.environ.get("PROXY_USERNAME")
+    password = os.environ.get("PROXY_PASSWORD")
+    if username:
+        config["username"] = username
+    if password:
+        config["password"] = password
+    return config
+
+
 def launch_browser(playwright, headed: bool):
     args = [
         "--disable-blink-features=AutomationControlled",
@@ -485,6 +509,7 @@ def launch_browser(playwright, headed: bool):
     return playwright.chromium.launch(
         headless=not headed,
         args=args,
+        proxy=build_proxy_config(),
     )
 
 
@@ -621,6 +646,8 @@ def run_job_loop(
                         pass
                     page = new_page(context)
                 stats["last_duration"] = round(time.perf_counter() - started, 2)
+                if CHECK_INTERVAL_SECONDS > 0:
+                    stop_event.wait(CHECK_INTERVAL_SECONDS)
         finally:
             try:
                 context.close()
