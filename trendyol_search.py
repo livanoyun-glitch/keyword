@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import datetime
 from threading import Event
-from urllib.parse import quote_plus
+from urllib.parse import quote, quote_plus, urlparse
 from zoneinfo import ZoneInfo
 
 from playwright.sync_api import (
@@ -477,22 +477,67 @@ def search_from_homepage(page: Page, keyword: str) -> None:
 
 
 def build_proxy_config() -> dict[str, str] | None:
-    """PROXY_SERVER / PROXY_USERNAME / PROXY_PASSWORD env değişkenlerinden
-    Playwright'ın beklediği proxy sözlüğünü üretir. PROXY_SERVER boşsa proxy
-    kullanılmaz (eski davranış)."""
-    server = (os.environ.get("PROXY_SERVER") or "").strip()
-    if not server:
+    """PROXY_SERVER / PROXY_USERNAME / PROXY_PASSWORD.
+
+    Chromium SOCKS5 kullanıcı/şifreyi ayrı alanlardan okumaz; URL içine gömülür.
+    Residential sağlayıcıların çoğu HTTP proxy verir; SOCKS portu yanlışsa
+    net::ERR_SOCKS_CONNECTION_FAILED çıkar — o zaman http:// kullanın.
+    """
+    raw = (os.environ.get("PROXY_SERVER") or "").strip().strip("\"'")
+    if not raw:
         return None
-    if "://" not in server:
-        server = f"http://{server}"
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    parsed = urlparse(raw)
+    scheme = (parsed.scheme or "http").lower()
+    if scheme in {"socks", "socks5h"}:
+        scheme = "socks5"
+    host = parsed.hostname
+    if not host:
+        print("Proxy: PROXY_SERVER host okunamadı", flush=True)
+        return None
+    port = parsed.port
+    netloc = host if port is None else f"{host}:{port}"
+    username = (
+        os.environ.get("PROXY_USERNAME")
+        or parsed.username
+        or ""
+    ).strip()
+    password = (
+        os.environ.get("PROXY_PASSWORD")
+        or os.environ.get("PROXY_PASS")
+        or parsed.password
+        or ""
+    ).strip()
+
+    if scheme.startswith("socks"):
+        if username:
+            netloc = f"{quote(username, safe='')}:{quote(password, safe='')}@{netloc}"
+        server = f"{scheme}://{netloc}"
+        print(f"Proxy: {scheme}://{host}" + (f":{port}" if port else "") + " (SOCKS)", flush=True)
+        return {"server": server}
+
+    server = f"{scheme}://{netloc}"
     config: dict[str, str] = {"server": server}
-    username = os.environ.get("PROXY_USERNAME")
-    password = os.environ.get("PROXY_PASSWORD")
     if username:
         config["username"] = username
     if password:
         config["password"] = password
+    print(
+        f"Proxy: {server} auth={'yes' if username and password else 'NO'}",
+        flush=True,
+    )
+    if not username or not password:
+        print(
+            "Proxy uyarısı: kullanıcı/şifre yok. Coolify'da PROXY_SERVER "
+            "http://LOGIN:SIFRE@gw.dataimpulse.com:823 olmalı.",
+            flush=True,
+        )
     return config
+
+
+def navigation_timeout_ms() -> int:
+    return 45000 if (os.environ.get("PROXY_SERVER") or "").strip() else 20000
 
 
 def launch_browser(playwright, headed: bool):

@@ -10,9 +10,6 @@ services:
       PLAYWRIGHT_DOCKER: "1"
       MAX_CONCURRENT: "3"
       CHECK_INTERVAL_SECONDS: "3"
-      PROXY_SERVER: "${PROXY_SERVER:-}"
-      PROXY_USERNAME: "${PROXY_USERNAME:-}"
-      PROXY_PASSWORD: "${PROXY_PASSWORD:-}"
     ports:
       - "8765"
     expose:
