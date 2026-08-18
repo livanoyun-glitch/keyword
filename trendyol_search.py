@@ -70,6 +70,16 @@ FIND_ON_PAGE_JS = """(productId) => {
     ids.push(m[1]);
     if (!href && m[1] === productId && re.test(raw)) href = raw;
   }
+  if (!href) {
+    for (const el of document.querySelectorAll('[data-id], [data-product-id], [data-contentid]')) {
+      const id = el.getAttribute('data-id') || el.getAttribute('data-product-id') || el.getAttribute('data-contentid') || '';
+      if (id !== productId) continue;
+      const a = el.closest('a') || el.querySelector('a[href*="-p-"]');
+      href = (a && a.getAttribute('href')) || ('/p-' + id);
+      if (!seen.has(id)) { seen.add(id); ids.push(id); }
+      break;
+    }
+  }
   const text = (document.body && document.body.innerText || '').slice(0, 2500);
   return {
     ids,
@@ -377,8 +387,12 @@ def listing_failure_message(page: Page, reason: str) -> str:
 
 
 def wait_for_listing(page: Page, timeout_ms: int) -> bool:
+    ready = page.locator(
+        "a[href*='-p-'], .p-card-wrppr, .p-card-chldrn-cntnr, "
+        ".prdct-cntnr-wrppr, [data-testid='product-card']"
+    ).first
     try:
-        page.locator("a[href*='-p-']").first.wait_for(state="attached", timeout=timeout_ms)
+        ready.wait_for(state="attached", timeout=timeout_ms)
         return True
     except PlaywrightTimeoutError:
         return False
@@ -396,14 +410,22 @@ def find_product_in_results(
             goto(page, search_url(keyword, page_index))
             dismiss_overlays(page)
 
-        listing_wait = 15000 if page_index == 1 else 8000
+        listing_wait = 25000 if page_index == 1 else 10000
         if not wait_for_listing(page, listing_wait):
-            empty_pages += 1
-            if empty_pages >= 2:
-                raise RuntimeError(
-                    listing_failure_message(page, "Arama listesi yüklenmedi")
-                )
-            continue
+            if page_index == 1:
+                page.wait_for_timeout(2500)
+                dismiss_overlays(page)
+                if not wait_for_listing(page, 12000):
+                    raise RuntimeError(
+                        listing_failure_message(page, "Arama listesi yüklenmedi")
+                    )
+            else:
+                empty_pages += 1
+                if empty_pages >= 2:
+                    raise RuntimeError(
+                        listing_failure_message(page, "Arama listesi yüklenmedi")
+                    )
+                continue
         empty_pages = 0
 
         info = {"href": "", "ids": []}
@@ -618,7 +640,15 @@ def goto(page: Page, url: str) -> None:
     last_error: Exception | None = None
     for attempt in range(2):
         try:
-            page.goto(url, wait_until="commit", timeout=timeout)
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            try:
+                page.wait_for_function(
+                    "() => !!(document.title || (document.body && document.body.innerText.trim().length > 20))",
+                    timeout=15000,
+                )
+            except PlaywrightTimeoutError:
+                pass
+            dismiss_overlays(page)
             return
         except Exception as exc:
             last_error = exc
