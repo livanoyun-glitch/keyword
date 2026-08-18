@@ -555,6 +555,10 @@ def build_proxy_config() -> dict[str, str] | None:
     return config
 
 
+def navigation_timeout_ms() -> int:
+    return 45000 if (os.environ.get("PROXY_SERVER") or "").strip() else 20000
+
+
 def goto(page: Page, url: str) -> None:
     timeout = navigation_timeout_ms()
     last_error: Exception | None = None
