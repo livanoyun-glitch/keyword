@@ -27,7 +27,6 @@ from zoneinfo import ZoneInfo
 from playwright.sync_api import (
     Locator,
     Page,
-    Route,
     TimeoutError as PlaywrightTimeoutError,
     sync_playwright,
 )
@@ -35,17 +34,9 @@ from playwright.sync_api import (
 TRENDYOL_HOME = "https://www.trendyol.com/"
 PRODUCT_HREF = re.compile(r"-p-\d+")
 PRODUCT_ID_IN_URL = re.compile(r"-p-(\d+)")
-
-BLOCKED_URL_PARTS = (
-    "google-analytics",
-    "googletagmanager",
-    "doubleclick",
-    "facebook.net",
-    "hotjar",
-    "newrelic",
-    "clarity.ms",
-    "criteo",
-    "adjust.com",
+HEAVY_ASSET = re.compile(
+    r"\.(?:png|jpe?g|gif|webp|avif|svg|ico|bmp|woff2?|ttf|otf|eot|mp4|webm|m4v)(?:\?|$)",
+    re.I,
 )
 
 PRODUCT_CARD_SELECTORS = [
@@ -206,12 +197,17 @@ def absolute_product_url(href: str | None) -> str:
     return ""
 
 
-def block_heavy_resources(route: Route) -> None:
-    url = route.request.url.lower()
-    if any(part in url for part in BLOCKED_URL_PARTS):
-        route.abort()
-        return
-    route.continue_()
+def attach_bandwidth_limits(context) -> None:
+    """HTML/JS kalsın; görsel, font, video ve tracker'lar proxy kotasını yakmasın."""
+    context.route(HEAVY_ASSET, lambda route: route.abort())
+    context.route(
+        re.compile(
+            r"(google-analytics|googletagmanager|googlesyndication|doubleclick|"
+            r"facebook\.net|hotjar|clarity\.ms|criteo|adjust\.com|newrelic)",
+            re.I,
+        ),
+        lambda route: route.abort(),
+    )
 
 
 def dismiss_overlays(page: Page) -> None:
@@ -422,7 +418,7 @@ def wait_for_listing(page: Page, timeout_ms: int) -> bool:
         return False
 
 
-def wait_out_challenge(page: Page, timeout_ms: int = 35000) -> bool:
+def wait_out_challenge(page: Page, timeout_ms: int = 12000) -> bool:
     """JS kontrol sayfası kendiliğinden geçerse ürün listesini bekle."""
     if wait_for_listing(page, 1500):
         return True
@@ -460,7 +456,7 @@ def find_product_in_results(
         listing_wait = 25000 if page_index == 1 else 10000
         if not wait_for_listing(page, listing_wait):
             if page_index == 1:
-                if wait_out_challenge(page, 45000):
+                if wait_out_challenge(page, 12000):
                     pass
                 else:
                     page.wait_for_timeout(2500)
@@ -482,7 +478,7 @@ def find_product_in_results(
         for _ in range(5):
             info = page.evaluate(FIND_ON_PAGE_JS, product_id)
             if info.get("blocked"):
-                if wait_out_challenge(page, 25000):
+                if wait_out_challenge(page, 12000):
                     continue
                 raise RuntimeError(listing_failure_message(page, "Bot/captcha sayfası"))
             if info.get("href"):
@@ -664,14 +660,23 @@ def _split_proxy_url(raw: str) -> tuple[str, str, int | None, str, str]:
     return scheme.lower(), host, port, username, password
 
 
+def _proxy_disabled() -> bool:
+    flag = (os.environ.get("PROXY_DISABLED") or "").strip().lower()
+    if flag in {"1", "true", "yes", "on"}:
+        return True
+    raw = (os.environ.get("PROXY_SERVER") or "").strip().strip("\"'")
+    return raw.lower() in {"", "off", "none", "null", "disabled", "false", "0", "-"}
+
+
 def parse_proxy_settings() -> dict[str, str] | None:
     global _PROXY_SETTINGS_CACHE
     if _PROXY_SETTINGS_CACHE is not None:
         return _PROXY_SETTINGS_CACHE[0]
-    raw = (os.environ.get("PROXY_SERVER") or "").strip().strip("\"'")
-    if not raw:
+    if _proxy_disabled():
+        print("Proxy: kapalı (PROXY_DISABLED veya PROXY_SERVER boş)", flush=True)
         _PROXY_SETTINGS_CACHE = [None]
         return None
+    raw = (os.environ.get("PROXY_SERVER") or "").strip().strip("\"'")
     scheme, host, port, username, password = _split_proxy_url(raw)
     if not host:
         print("Proxy: PROXY_SERVER host okunamadı", flush=True)
@@ -964,16 +969,19 @@ def goto(page: Page, url: str) -> None:
                       if (document.querySelector('a[href*="-p-"]')) return true;
                       const blob = ((document.title || '') + ' ' + (document.body && document.body.innerText || '')).toLowerCase();
                       const challenge = /just a moment|bir dakika lütfen|güvenlik doğrulaması|attention required|checking your browser|cf-chl|cloudflare|kötü niyetli bot/.test(blob);
-                      if (challenge) return false;
+                      if (challenge) return true;
                       return !!(document.title || (document.body && document.body.innerText.trim().length > 20));
                     }""",
-                    timeout=20000,
+                    timeout=15000,
                 )
             except PlaywrightTimeoutError:
-                wait_out_challenge(page, 45000)
-            dismiss_overlays(page)
+                pass
             if snapshot_is_challenge(listing_page_snapshot(page)):
-                raise RuntimeError(listing_failure_message(page, "Arama listesi yüklenmedi"))
+                if not wait_out_challenge(page, 12000):
+                    raise RuntimeError(
+                        listing_failure_message(page, "Arama listesi yüklenmedi")
+                    )
+            dismiss_overlays(page)
             return
         except Exception as exc:
             last_error = exc
@@ -989,7 +997,7 @@ def goto(page: Page, url: str) -> None:
 
 
 def new_browser_context(browser):
-    return browser.new_context(
+    context = browser.new_context(
         locale="tr-TR",
         timezone_id="Europe/Istanbul",
         viewport={"width": 1280, "height": 800},
@@ -1001,6 +1009,8 @@ def new_browser_context(browser):
             "Chrome/131.0.0.0 Safari/537.36"
         ),
     )
+    attach_bandwidth_limits(context)
+    return context
 
 
 def is_challenge_error(exc: BaseException) -> bool:
@@ -1059,6 +1069,8 @@ def launch_browser(playwright, headed: bool, session_id: str | None = None):
         "--disable-blink-features=AutomationControlled",
         "--disable-notifications",
         "--disable-dev-shm-usage",
+        "--blink-settings=imagesEnabled=false",
+        "--disable-remote-fonts",
     ]
     if os.environ.get("PLAYWRIGHT_DOCKER") == "1":
         args.extend(["--no-sandbox", "--disable-gpu"])
@@ -1073,8 +1085,6 @@ def launch_browser(playwright, headed: bool, session_id: str | None = None):
 
 def new_page(context) -> Page:
     page = context.new_page()
-    if not (os.environ.get("PROXY_SERVER") or "").strip():
-        page.route("**/*", block_heavy_resources)
     page.set_default_timeout(navigation_timeout_ms())
     return page
 
