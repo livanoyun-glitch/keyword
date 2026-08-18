@@ -32,6 +32,10 @@ from playwright.sync_api import (
 )
 
 TRENDYOL_HOME = "https://www.trendyol.com/"
+FOREIGN_STOREFRONT = re.compile(
+    r"https://www\.trendyol\.com/(de|en|fr|at|nl|be|pl|gr|ro|bg|cz|sk|hu|sa|ae|kw|qa|az|kz)(?:-[a-zA-Z]{2})?(?=/|\?|$)",
+    re.I,
+)
 PRODUCT_HREF = re.compile(r"-p-\d+")
 PRODUCT_ID_IN_URL = re.compile(r"-p-(\d+)")
 HEAVY_ASSET = re.compile(
@@ -163,6 +167,16 @@ def search_url(keyword: str, page_index: int = 1) -> str:
     return url
 
 
+def turkey_url(url: str) -> str:
+    if not url:
+        return url
+    return FOREIGN_STOREFRONT.sub("https://www.trendyol.com", url, count=1)
+
+
+def is_foreign_storefront(url: str) -> bool:
+    return bool(FOREIGN_STOREFRONT.search(url or ""))
+
+
 def normalize_product_id(value: str) -> str:
     raw = (value or "").strip()
     if not raw:
@@ -218,6 +232,8 @@ def dismiss_overlays(page: Page) -> None:
                 'Tümünü Kabul Et',
                 'Kabul Et',
                 'Accept All',
+                'Alle akzeptieren',
+                'Accept all',
             ];
             for (const button of document.querySelectorAll('button')) {
                 const text = (button.innerText || '').trim();
@@ -231,6 +247,49 @@ def dismiss_overlays(page: Page) -> None:
             document.querySelector('.modal-close')?.click();
         }"""
     )
+
+
+def pick_turkey_country(page: Page) -> bool:
+    clicked = page.evaluate(
+        """() => {
+          const labels = ['Türkiye', 'Turkey', 'Turkiye'];
+          for (const el of document.querySelectorAll('a, button, [role="button"], span')) {
+            const text = (el.innerText || el.textContent || '').trim();
+            if (labels.some((label) => text === label || text.startsWith(label + ' ') || text.startsWith(label + '\\n'))) {
+              el.click();
+              return true;
+            }
+          }
+          const link = document.querySelector('a[href*="country=TR"], a[href*="countryCode=TR"], a[href*="storeFrontId=1"]');
+          if (link) { link.click(); return true; }
+          return false;
+        }"""
+    )
+    return bool(clicked)
+
+
+def force_turkey_storefront(page: Page) -> None:
+    current = page.url or ""
+    low = current.lower()
+    if "select-country" in low or "ulke-sec" in low or "choose-country" in low:
+        if pick_turkey_country(page):
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except PlaywrightTimeoutError:
+                pass
+            current = page.url or ""
+    rewritten = turkey_url(current)
+    if rewritten != current and is_foreign_storefront(current):
+        print(f"Yabancı vitrin -> TR: {current[:80]}", flush=True)
+        page.goto(rewritten, wait_until="commit", timeout=navigation_timeout_ms())
+        try:
+            page.wait_for_function(
+                "() => !!(document.body && document.body.innerText.trim().length > 20)",
+                timeout=12000,
+            )
+        except PlaywrightTimeoutError:
+            pass
+        dismiss_overlays(page)
 
 
 def product_links(page: Page) -> Locator:
@@ -378,6 +437,8 @@ def classify_listing_failure(snap: dict) -> str:
         return "sayfa hiç açılmadı (about:blank)"
     if snapshot_is_challenge(snap):
         return "Cloudflare / bot duvarı"
+    if is_foreign_storefront(url) or "/de/" in url or "suchergebnisse" in blob:
+        return "Almanya/yabancı vitrin — Türkiye sitesi değil (VPS IP)"
     if "captcha" in blob:
         return "captcha"
     if any(word in blob for word in ("access denied", "403", "request blocked", "erişim engell")):
@@ -407,10 +468,7 @@ def listing_failure_message(page: Page, reason: str) -> str:
 
 
 def wait_for_listing(page: Page, timeout_ms: int) -> bool:
-    ready = page.locator(
-        "a[href*='-p-'], .p-card-wrppr, .p-card-chldrn-cntnr, "
-        ".prdct-cntnr-wrppr, [data-testid='product-card']"
-    ).first
+    ready = page.locator("a[href*='-p-']").first
     try:
         ready.wait_for(state="attached", timeout=timeout_ms)
         return True
@@ -491,6 +549,8 @@ def find_product_in_results(
             page.wait_for_timeout(120)
 
         if int(info.get("count") or 0) == 0:
+            if page_index == 1:
+                raise RuntimeError(listing_failure_message(page, "Arama listesi boş"))
             empty_pages += 1
             if empty_pages >= 2:
                 raise RuntimeError(listing_failure_message(page, "Arama listesi boş"))
@@ -982,6 +1042,7 @@ def goto(page: Page, url: str) -> None:
                         listing_failure_message(page, "Arama listesi yüklenmedi")
                     )
             dismiss_overlays(page)
+            force_turkey_storefront(page)
             return
         except Exception as exc:
             last_error = exc
@@ -1002,13 +1063,28 @@ def new_browser_context(browser):
         timezone_id="Europe/Istanbul",
         viewport={"width": 1280, "height": 800},
         ignore_https_errors=True,
-        extra_http_headers={"Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8"},
+        extra_http_headers={
+            "Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8",
+            "culture": "tr-TR",
+            "storefront-id": "1",
+        },
         user_agent=(
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/131.0.0.0 Safari/537.36"
         ),
     )
+    try:
+        context.add_cookies(
+            [
+                {"name": "language", "value": "tr", "url": TRENDYOL_HOME},
+                {"name": "culture", "value": "tr-TR", "url": TRENDYOL_HOME},
+                {"name": "storeFrontId", "value": "1", "url": TRENDYOL_HOME},
+                {"name": "countryCode", "value": "TR", "url": TRENDYOL_HOME},
+            ]
+        )
+    except Exception:
+        pass
     attach_bandwidth_limits(context)
     return context
 
