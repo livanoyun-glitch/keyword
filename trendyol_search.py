@@ -16,7 +16,8 @@ import sys
 import time
 from datetime import datetime
 from threading import Event
-from urllib.parse import quote, quote_plus, urlparse
+from urllib.parse import quote, quote_plus, unquote, urlparse
+from urllib.request import ProxyHandler, Request, build_opener
 from zoneinfo import ZoneInfo
 
 from playwright.sync_api import (
@@ -574,9 +575,9 @@ def search_from_homepage(page: Page, keyword: str) -> None:
 def build_proxy_config() -> dict[str, str] | None:
     """PROXY_SERVER / PROXY_USERNAME / PROXY_PASSWORD.
 
-    Chromium SOCKS5 kullanıcı/şifreyi ayrı alanlardan okumaz; URL içine gömülür.
-    Residential sağlayıcıların çoğu HTTP proxy verir; SOCKS portu yanlışsa
-    net::ERR_SOCKS_CONNECTION_FAILED çıkar — o zaman http:// kullanın.
+    Chromium SOCKS5'te kullanıcı/şifre göndermez (ERR_SOCKS_CONNECTION_FAILED).
+    DataImpulse Playwright kurulumu HTTP 823 + ayrı username/password ister.
+    socks5://...:824 verilse bile otomatik http://...:823 yapılır.
     """
     raw = (os.environ.get("PROXY_SERVER") or "").strip().strip("\"'")
     if not raw:
@@ -585,20 +586,17 @@ def build_proxy_config() -> dict[str, str] | None:
         raw = f"http://{raw}"
     parsed = urlparse(raw)
     scheme = (parsed.scheme or "http").lower()
-    if scheme in {"socks", "socks5h"}:
-        scheme = "socks5"
     host = parsed.hostname
     if not host:
         print("Proxy: PROXY_SERVER host okunamadı", flush=True)
         return None
     port = parsed.port
-    netloc = host if port is None else f"{host}:{port}"
-    username = (
+    username = unquote(
         os.environ.get("PROXY_USERNAME")
         or parsed.username
         or ""
     ).strip()
-    password = (
+    password = unquote(
         os.environ.get("PROXY_PASSWORD")
         or os.environ.get("PROXY_PASS")
         or parsed.password
@@ -606,14 +604,20 @@ def build_proxy_config() -> dict[str, str] | None:
     ).strip()
 
     if scheme.startswith("socks"):
-        if username:
-            netloc = f"{quote(username, safe='')}:{quote(password, safe='')}@{netloc}"
-        server = f"{scheme}://{netloc}"
-        print(f"Proxy: {scheme}://{host}" + (f":{port}" if port else "") + " (SOCKS)", flush=True)
-        return {"server": server}
+        print(
+            "Chromium SOCKS5 şifre desteklemez; DataImpulse HTTP 823 kullanılıyor.",
+            flush=True,
+        )
+        scheme = "http"
+        if port in {None, 824}:
+            port = 823
 
+    netloc = host if port is None else f"{host}:{port}"
     server = f"{scheme}://{netloc}"
-    config: dict[str, str] = {"server": server}
+    config: dict[str, str] = {
+        "server": server,
+        "bypass": "localhost,127.0.0.1,::1",
+    }
     if username:
         config["username"] = username
     if password:
@@ -625,14 +629,39 @@ def build_proxy_config() -> dict[str, str] | None:
     if not username or not password:
         print(
             "Proxy uyarısı: kullanıcı/şifre yok. PROXY_SERVER "
-            "socks5://LOGIN:SIFRE@gw.dataimpulse.com:824 olmalı.",
+            "http://LOGIN:SIFRE@gw.dataimpulse.com:823 olmalı.",
             flush=True,
         )
     return config
 
 
+def probe_proxy() -> None:
+    config = build_proxy_config()
+    if not config:
+        return
+    parsed = urlparse(config["server"])
+    host = parsed.hostname
+    port = parsed.port or 823
+    username = config.get("username") or ""
+    password = config.get("password") or ""
+    auth = ""
+    if username:
+        auth = f"{quote(username, safe='')}:{quote(password, safe='')}@"
+    proxy_url = f"http://{auth}{host}:{port}"
+    opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
+    try:
+        with opener.open(Request("https://api.ipify.org"), timeout=25) as response:
+            ip = response.read().decode("utf-8", "replace").strip()[:64]
+        print(f"Proxy ön kontrol OK, çıkış IP: {ip}", flush=True)
+    except Exception as exc:
+        raise RuntimeError(
+            "DataImpulse HTTP 823 bağlanamadı. Bakiye, login/şifre ve VPS'in "
+            f"gw.dataimpulse.com:823 çıkışına açık olduğunu kontrol et. ({exc})"
+        ) from exc
+
+
 def navigation_timeout_ms() -> int:
-    return 45000 if (os.environ.get("PROXY_SERVER") or "").strip() else 20000
+    return 90000 if (os.environ.get("PROXY_SERVER") or "").strip() else 20000
 
 
 def goto(page: Page, url: str) -> None:
@@ -658,12 +687,13 @@ def goto(page: Page, url: str) -> None:
             page.wait_for_timeout(800)
     text = str(last_error or "timeout")
     raise RuntimeError(
-        "Trendyol proxy üzerinden açılmadı. DataImpulse 824 SOCKS, bakiye ve VPS IP whitelist "
-        f"kontrol et. ({text[:180]})"
+        "Trendyol HTTP proxy üzerinden açılmadı. DataImpulse bakiyesi ve "
+        f"PROXY_SERVER=http://LOGIN:SIFRE@gw.dataimpulse.com:823 kontrol et. ({text[:180]})"
     )
 
 
 def launch_browser(playwright, headed: bool):
+    proxy = build_proxy_config()
     args = [
         "--disable-blink-features=AutomationControlled",
         "--disable-notifications",
@@ -671,10 +701,17 @@ def launch_browser(playwright, headed: bool):
     ]
     if os.environ.get("PLAYWRIGHT_DOCKER") == "1":
         args.extend(["--no-sandbox", "--disable-gpu"])
+    if proxy:
+        args.extend(
+            [
+                "--disable-http2",
+                "--proxy-bypass-list=<-loopback>",
+            ]
+        )
     return playwright.chromium.launch(
         headless=not headed,
         args=args,
-        proxy=build_proxy_config(),
+        proxy=proxy,
     )
 
 
@@ -743,6 +780,7 @@ def run_job_loop(
     stats["status"] = "running"
     stats["last_error"] = ""
     stats["history"] = normalize_hourly_history(stats.get("history") or [])
+    probe_proxy()
 
     with sync_playwright() as playwright:
         browser = launch_browser(playwright, headed=headed)
@@ -860,6 +898,7 @@ def run(
 
     overall_started = time.perf_counter()
     completed = 0
+    probe_proxy()
 
     with sync_playwright() as playwright:
         browser = launch_browser(playwright, headed=headed)
