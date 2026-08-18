@@ -358,7 +358,7 @@ def spawn_worker(job: dict) -> None:
             )
         except Exception as exc:
             job["stats"]["status"] = "error"
-            job["stats"]["last_error"] = str(exc).split("\n", 1)[0][:240]
+            job["stats"]["last_error"] = str(exc).split("\n", 1)[0][:400]
         finally:
             with LOCK:
                 if job["stats"].get("status") == "done":

@@ -320,6 +320,62 @@ def rank_from_listing(page: Page, product_id: str) -> tuple[int, int, int]:
     return overall, listing_page, rank
 
 
+def listing_page_snapshot(page: Page) -> dict:
+    try:
+        return page.evaluate(
+            """() => {
+              const text = (document.body && document.body.innerText || '')
+                .replace(/\\s+/g, ' ').trim().slice(0, 360);
+              return {
+                url: location.href || '',
+                title: document.title || '',
+                links: document.querySelectorAll('a[href*="-p-"]').length,
+                text,
+              };
+            }"""
+        ) or {}
+    except Exception:
+        return {"url": getattr(page, "url", ""), "title": "", "links": 0, "text": ""}
+
+
+def classify_listing_failure(snap: dict) -> str:
+    url = str(snap.get("url") or "")
+    title = str(snap.get("title") or "")
+    text = str(snap.get("text") or "")
+    blob = f"{url} {title} {text}".lower()
+    links = int(snap.get("links") or 0)
+    if "about:blank" in url or url == "":
+        return "sayfa hiç açılmadı (about:blank)"
+    if any(word in blob for word in ("just a moment", "cloudflare", "attention required", "cf-chl")):
+        return "Cloudflare / bot duvarı"
+    if "captcha" in blob:
+        return "captcha"
+    if any(word in blob for word in ("access denied", "403", "request blocked", "erişim engell")):
+        return "IP/erişim engeli"
+    if any(word in blob for word in ("proxy", "dataimpulse", "authentication failed", "407")):
+        return "proxy kimlik doğrulama hatası"
+    if any(word in blob for word in ("tüm tanımlama", "kabul et", "çerez", "cookie")):
+        return "çerez ekranı, ürün listesi yok"
+    if "/sr" not in url and "trendyol.com" in url:
+        return f"arama sayfasına girmedi, yönlendi: {url[:80]}"
+    if "trendyol.com" in url and links == 0:
+        return "Trendyol açıldı ama ürün kartı yok (JS/proxy yavaş veya boş sonuç)"
+    if links == 0:
+        return f"ürün linki yok, yabancı sayfa: {title[:80] or url[:80]}"
+    return f"{links} ürün linki var ama aranan kod yok"
+
+
+def listing_failure_message(page: Page, reason: str) -> str:
+    snap = listing_page_snapshot(page)
+    diagnosis = classify_listing_failure(snap)
+    url = str(snap.get("url") or "")[:90]
+    title = str(snap.get("title") or "")[:60]
+    text = str(snap.get("text") or "")[:120]
+    message = f"{reason} | {diagnosis} | {url} | {title} | {text}"
+    print(f"Liste hatası: {message}", flush=True)
+    return message[:400]
+
+
 def wait_for_listing(page: Page, timeout_ms: int) -> bool:
     try:
         page.locator("a[href*='-p-']").first.wait_for(state="attached", timeout=timeout_ms)
@@ -345,7 +401,7 @@ def find_product_in_results(
             empty_pages += 1
             if empty_pages >= 2:
                 raise RuntimeError(
-                    "Arama listesi yüklenmedi. Proxy çalışmıyor veya Trendyol bot sayfası gösteriyor."
+                    listing_failure_message(page, "Arama listesi yüklenmedi")
                 )
             continue
         empty_pages = 0
@@ -354,7 +410,7 @@ def find_product_in_results(
         for _ in range(5):
             info = page.evaluate(FIND_ON_PAGE_JS, product_id)
             if info.get("blocked"):
-                raise RuntimeError("Trendyol bot/captcha sayfası gösterdi.")
+                raise RuntimeError(listing_failure_message(page, "Bot/captcha sayfası"))
             if info.get("href"):
                 ids = [str(item) for item in (info.get("ids") or [])]
                 on_page = ids.index(product_id) + 1 if product_id in ids else 1
@@ -367,9 +423,7 @@ def find_product_in_results(
         if int(info.get("count") or 0) == 0:
             empty_pages += 1
             if empty_pages >= 2:
-                raise RuntimeError(
-                    "Arama listesi boş geldi. Proxy veya bot koruması olabilir."
-                )
+                raise RuntimeError(listing_failure_message(page, "Arama listesi boş"))
 
     raise RuntimeError(
         f"Ürün kodu {product_id} ilk {MAX_SEARCH_PAGES} sayfada bulunamadı."
@@ -722,7 +776,7 @@ def run_job_loop(
                         break
                 except Exception as exc:
                     stats["fail"] = int(stats.get("fail", 0)) + 1
-                    stats["last_error"] = str(exc).split("\n", 1)[0][:240]
+                    stats["last_error"] = str(exc).split("\n", 1)[0][:400]
                     try:
                         page.close()
                     except Exception:
