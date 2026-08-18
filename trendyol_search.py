@@ -31,7 +31,6 @@ TRENDYOL_HOME = "https://www.trendyol.com/"
 PRODUCT_HREF = re.compile(r"-p-\d+")
 PRODUCT_ID_IN_URL = re.compile(r"-p-(\d+)")
 
-BLOCKED_RESOURCE_TYPES = {"image", "media", "font"}
 BLOCKED_URL_PARTS = (
     "google-analytics",
     "googletagmanager",
@@ -58,23 +57,27 @@ HOURLY_HISTORY_LIMIT = 168
 # Turlar arası bekleme (saniye). 0 = ara vermeden tekrar ara.
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "3"))
 
-LISTING_IDS_JS = """() => {
-  const collect = (nodes) => {
-    const ids = [];
-    const seen = new Set();
-    for (const a of nodes) {
-      const m = (a.getAttribute('href') || '').match(/-p-(\\d+)/);
-      if (!m || seen.has(m[1])) continue;
-      seen.add(m[1]);
-      ids.push(m[1]);
-    }
-    return ids;
+FIND_ON_PAGE_JS = """(productId) => {
+  const re = new RegExp('-p-' + productId + '(?:[/?#]|$)');
+  const ids = [];
+  const seen = new Set();
+  let href = '';
+  for (const a of document.querySelectorAll('a[href*="-p-"]')) {
+    const raw = a.getAttribute('href') || '';
+    const m = raw.match(/-p-(\\d+)/);
+    if (!m || seen.has(m[1])) continue;
+    seen.add(m[1]);
+    ids.push(m[1]);
+    if (!href && m[1] === productId && re.test(raw)) href = raw;
+  }
+  const text = (document.body && document.body.innerText || '').slice(0, 2500);
+  return {
+    ids,
+    href,
+    count: document.querySelectorAll('a[href*="-p-"]').length,
+    blocked: /captcha|access denied|just a moment|unusual traffic|bot/i.test(text)
+      || /just a moment/i.test(document.title || ''),
   };
-  const cards = document.querySelectorAll(
-    'div.p-card-wrppr a[href*="-p-"], a.p-card-wrppr[href*="-p-"], .prdct-cntnr-wrppr a[href*="-p-"]'
-  );
-  const fromCards = collect(cards);
-  return fromCards.length ? fromCards : collect(document.querySelectorAll('a[href*="-p-"]'));
 }"""
 
 
@@ -177,11 +180,7 @@ def absolute_product_url(href: str | None) -> str:
 
 
 def block_heavy_resources(route: Route) -> None:
-    request = route.request
-    if request.resource_type in BLOCKED_RESOURCE_TYPES:
-        route.abort()
-        return
-    url = request.url.lower()
+    url = route.request.url.lower()
     if any(part in url for part in BLOCKED_URL_PARTS):
         route.abort()
         return
@@ -224,7 +223,19 @@ def product_links(page: Page) -> Locator:
 
 
 def unique_listing_ids(page: Page) -> list[str]:
-    ids = page.evaluate(LISTING_IDS_JS)
+    ids = page.evaluate(
+        """() => {
+          const ids = [];
+          const seen = new Set();
+          for (const a of document.querySelectorAll('a[href*="-p-"]')) {
+            const m = (a.getAttribute('href') || '').match(/-p-(\\d+)/);
+            if (!m || seen.has(m[1])) continue;
+            seen.add(m[1]);
+            ids.push(m[1]);
+          }
+          return ids;
+        }"""
+    )
     return [str(item) for item in (ids or [])]
 
 
@@ -309,48 +320,61 @@ def rank_from_listing(page: Page, product_id: str) -> tuple[int, int, int]:
     return overall, listing_page, rank
 
 
+def wait_for_listing(page: Page, timeout_ms: int) -> bool:
+    try:
+        page.locator("a[href*='-p-']").first.wait_for(state="attached", timeout=timeout_ms)
+        return True
+    except PlaywrightTimeoutError:
+        return False
+
+
 def find_product_in_results(
     page: Page,
     keyword: str,
     product_id: str,
 ) -> tuple[Locator, int, int, int]:
-    href_pattern = product_id_href_pattern(product_id)
+    nav_timeout = navigation_timeout_ms()
+    empty_pages = 0
 
     for page_index in range(1, MAX_SEARCH_PAGES + 1):
         if page_index > 1:
             page.goto(
                 search_url(keyword, page_index),
                 wait_until="domcontentloaded",
-                timeout=20000,
+                timeout=nav_timeout,
             )
             dismiss_overlays(page)
 
-        try:
-            page.locator("a[href*='-p-']").first.wait_for(state="attached", timeout=8000)
-        except PlaywrightTimeoutError:
-            if page_index == 1:
-                continue
-            break
+        listing_wait = 15000 if page_index == 1 else 8000
+        if not wait_for_listing(page, listing_wait):
+            empty_pages += 1
+            if empty_pages >= 2:
+                raise RuntimeError(
+                    "Arama listesi yüklenmedi. Proxy çalışmıyor veya Trendyol bot sayfası gösteriyor."
+                )
+            continue
+        empty_pages = 0
 
-        links = page.locator(f"a[href*='-p-{product_id}']")
-        for _ in range(12):
-            count = links.count()
-            for i in range(count):
-                href = links.nth(i).get_attribute("href") or ""
-                if not href_pattern.search(href):
-                    continue
-                ids = unique_listing_ids(page)
-                if product_id in ids:
-                    on_page = ids.index(product_id) + 1
-                else:
-                    on_page = 1
+        info = {"href": "", "ids": []}
+        for _ in range(5):
+            info = page.evaluate(FIND_ON_PAGE_JS, product_id)
+            if info.get("blocked"):
+                raise RuntimeError("Trendyol bot/captcha sayfası gösterdi.")
+            if info.get("href"):
+                ids = [str(item) for item in (info.get("ids") or [])]
+                on_page = ids.index(product_id) + 1 if product_id in ids else 1
                 overall = (page_index - 1) * PAGE_SIZE + on_page
-                return links.nth(i), page_index, on_page, overall
-            page.mouse.wheel(0, 1800)
-            page.wait_for_timeout(200)
+                card = page.locator(f"a[href*='-p-{product_id}']").first
+                return card, page_index, on_page, overall
+            page.mouse.wheel(0, 2200)
+            page.wait_for_timeout(120)
 
-        if page.locator("a[href*='-p-']").count() == 0:
-            break
+        if int(info.get("count") or 0) == 0:
+            empty_pages += 1
+            if empty_pages >= 2:
+                raise RuntimeError(
+                    "Arama listesi boş geldi. Proxy veya bot koruması olabilir."
+                )
 
     raise RuntimeError(
         f"Ürün kodu {product_id} ilk {MAX_SEARCH_PAGES} sayfada bulunamadı."
@@ -445,7 +469,7 @@ def open_product(page: Page, card: Locator, product_id: str = "") -> Page:
     href = absolute_product_url(card.get_attribute("href"))
     if href and url_has_product_id(href, product_id):
         try:
-            page.goto(href, wait_until="domcontentloaded", timeout=20000)
+            page.goto(href, wait_until="domcontentloaded", timeout=navigation_timeout_ms())
         except Exception as exc:
             if "ERR_ABORTED" in str(exc) and url_has_product_id(page.url, product_id):
                 return page
@@ -570,13 +594,13 @@ def run_once(
     index: int,
     from_home: bool,
 ) -> tuple[Page, int, int, int, str]:
-    page.goto(TRENDYOL_HOME, wait_until="domcontentloaded", timeout=20000)
-    dismiss_overlays(page)
-
+    timeout = navigation_timeout_ms()
     if from_home:
+        page.goto(TRENDYOL_HOME, wait_until="domcontentloaded", timeout=timeout)
+        dismiss_overlays(page)
         search_from_homepage(page, keyword)
     else:
-        page.goto(search_url(keyword), wait_until="domcontentloaded", timeout=20000)
+        page.goto(search_url(keyword), wait_until="domcontentloaded", timeout=timeout)
     dismiss_overlays(page)
 
     listing_page = 1
