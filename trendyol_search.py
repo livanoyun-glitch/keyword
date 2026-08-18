@@ -624,8 +624,8 @@ def build_proxy_config() -> dict[str, str] | None:
     )
     if not username or not password:
         print(
-            "Proxy uyarısı: kullanıcı/şifre yok. Coolify'da PROXY_SERVER "
-            "http://LOGIN:SIFRE@gw.dataimpulse.com:823 olmalı.",
+            "Proxy uyarısı: kullanıcı/şifre yok. PROXY_SERVER "
+            "socks5://LOGIN:SIFRE@gw.dataimpulse.com:824 olmalı.",
             flush=True,
         )
     return config
@@ -640,11 +640,11 @@ def goto(page: Page, url: str) -> None:
     last_error: Exception | None = None
     for attempt in range(2):
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+            page.goto(url, wait_until="commit", timeout=timeout)
             try:
                 page.wait_for_function(
-                    "() => !!(document.title || (document.body && document.body.innerText.trim().length > 20))",
-                    timeout=15000,
+                    "() => !!(document.title || (document.body && document.body.innerText.trim().length > 20) || document.querySelector('a[href*=\"-p-\"]'))",
+                    timeout=20000,
                 )
             except PlaywrightTimeoutError:
                 pass
@@ -658,8 +658,8 @@ def goto(page: Page, url: str) -> None:
             page.wait_for_timeout(800)
     text = str(last_error or "timeout")
     raise RuntimeError(
-        "Trendyol proxy üzerinden açılmadı. DataImpulse bakiyesi, VPS IP whitelist "
-        f"ve PROXY_SERVER=http://LOGIN:SIFRE@gw.dataimpulse.com:823 kontrol et. ({text[:180]})"
+        "Trendyol proxy üzerinden açılmadı. DataImpulse 824 SOCKS, bakiye ve VPS IP whitelist "
+        f"kontrol et. ({text[:180]})"
     )
 
 

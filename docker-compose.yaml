@@ -10,7 +10,7 @@ services:
       PLAYWRIGHT_DOCKER: "1"
       MAX_CONCURRENT: "3"
       CHECK_INTERVAL_SECONDS: "3"
-      PROXY_SERVER: "http://ddd817fa8b6e8d6729f8:6a4c0717f643a9d8@gw.dataimpulse.com:823"
+      PROXY_SERVER: "socks5://ddd817fa8b6e8d6729f8:6a4c0717f643a9d8@gw.dataimpulse.com:824"
     ports:
       - "8765"
     expose:
