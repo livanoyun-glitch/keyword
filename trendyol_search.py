@@ -60,6 +60,18 @@ ISTANBUL_TZ = ZoneInfo("Europe/Istanbul")
 HOURLY_HISTORY_LIMIT = 168
 # Turlar arası bekleme (saniye). 0 = ara vermeden tekrar ara.
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "3"))
+# Cloudflare ara sayfası geçmezse yeni IP denemeden önce bekleme.
+CHALLENGE_BACKOFF_SECONDS = int(os.environ.get("CHALLENGE_BACKOFF_SECONDS", "30"))
+CHALLENGE_MARKERS = (
+    "just a moment",
+    "bir dakika lütfen",
+    "güvenlik doğrulaması",
+    "attention required",
+    "checking your browser",
+    "cf-chl",
+    "cloudflare",
+    "kötü niyetli bot",
+)
 
 FIND_ON_PAGE_JS = """(productId) => {
   const re = new RegExp('-p-' + productId + '(?:[/?#]|$)');
@@ -85,12 +97,12 @@ FIND_ON_PAGE_JS = """(productId) => {
     }
   }
   const text = (document.body && document.body.innerText || '').slice(0, 2500);
+  const blob = ((document.title || '') + ' ' + text).toLowerCase();
   return {
     ids,
     href,
     count: document.querySelectorAll('a[href*="-p-"]').length,
-    blocked: /captcha|access denied|just a moment|unusual traffic|bot/i.test(text)
-      || /just a moment/i.test(document.title || ''),
+    blocked: /captcha|access denied|just a moment|bir dakika lütfen|güvenlik doğrulaması|unusual traffic|cf-chl|checking your browser/.test(blob),
   };
 }"""
 
@@ -352,6 +364,13 @@ def listing_page_snapshot(page: Page) -> dict:
         return {"url": getattr(page, "url", ""), "title": "", "links": 0, "text": ""}
 
 
+def snapshot_is_challenge(snap: dict) -> bool:
+    if int(snap.get("links") or 0) > 0:
+        return False
+    blob = f"{snap.get('title') or ''} {snap.get('text') or ''}".lower()
+    return any(marker in blob for marker in CHALLENGE_MARKERS)
+
+
 def classify_listing_failure(snap: dict) -> str:
     url = str(snap.get("url") or "")
     title = str(snap.get("title") or "")
@@ -360,7 +379,7 @@ def classify_listing_failure(snap: dict) -> str:
     links = int(snap.get("links") or 0)
     if "about:blank" in url or url == "":
         return "sayfa hiç açılmadı (about:blank)"
-    if any(word in blob for word in ("just a moment", "cloudflare", "attention required", "cf-chl")):
+    if snapshot_is_challenge(snap):
         return "Cloudflare / bot duvarı"
     if "captcha" in blob:
         return "captcha"
@@ -402,6 +421,29 @@ def wait_for_listing(page: Page, timeout_ms: int) -> bool:
         return False
 
 
+def wait_out_challenge(page: Page, timeout_ms: int = 35000) -> bool:
+    """JS kontrol sayfası kendiliğinden geçerse ürün listesini bekle."""
+    if wait_for_listing(page, 1500):
+        return True
+    if not snapshot_is_challenge(listing_page_snapshot(page)):
+        return wait_for_listing(page, min(timeout_ms, 8000))
+    print("Cloudflare ara sayfası: geçmesi bekleniyor", flush=True)
+    try:
+        page.wait_for_function(
+            """() => {
+              if (document.querySelector('a[href*="-p-"]')) return true;
+              const blob = ((document.title || '') + ' ' + (document.body && document.body.innerText || '')).toLowerCase();
+              const challenge = /just a moment|bir dakika lütfen|güvenlik doğrulaması|attention required|checking your browser|cf-chl|cloudflare|kötü niyetli bot/.test(blob);
+              return !challenge && !!(document.body && document.body.innerText.trim().length > 20);
+            }""",
+            timeout=timeout_ms,
+        )
+    except PlaywrightTimeoutError:
+        return False
+    dismiss_overlays(page)
+    return wait_for_listing(page, 12000)
+
+
 def find_product_in_results(
     page: Page,
     keyword: str,
@@ -417,12 +459,15 @@ def find_product_in_results(
         listing_wait = 25000 if page_index == 1 else 10000
         if not wait_for_listing(page, listing_wait):
             if page_index == 1:
-                page.wait_for_timeout(2500)
-                dismiss_overlays(page)
-                if not wait_for_listing(page, 12000):
-                    raise RuntimeError(
-                        listing_failure_message(page, "Arama listesi yüklenmedi")
-                    )
+                if wait_out_challenge(page, 35000):
+                    pass
+                else:
+                    page.wait_for_timeout(2500)
+                    dismiss_overlays(page)
+                    if not wait_for_listing(page, 8000):
+                        raise RuntimeError(
+                            listing_failure_message(page, "Arama listesi yüklenmedi")
+                        )
             else:
                 empty_pages += 1
                 if empty_pages >= 2:
@@ -436,6 +481,8 @@ def find_product_in_results(
         for _ in range(5):
             info = page.evaluate(FIND_ON_PAGE_JS, product_id)
             if info.get("blocked"):
+                if wait_out_challenge(page, 25000):
+                    continue
                 raise RuntimeError(listing_failure_message(page, "Bot/captcha sayfası"))
             if info.get("href"):
                 ids = [str(item) for item in (info.get("ids") or [])]
@@ -871,11 +918,17 @@ def goto(page: Page, url: str) -> None:
             page.goto(url, wait_until="commit", timeout=timeout)
             try:
                 page.wait_for_function(
-                    "() => !!(document.title || (document.body && document.body.innerText.trim().length > 20) || document.querySelector('a[href*=\"-p-\"]'))",
+                    """() => {
+                      if (document.querySelector('a[href*="-p-"]')) return true;
+                      const blob = ((document.title || '') + ' ' + (document.body && document.body.innerText || '')).toLowerCase();
+                      const challenge = /just a moment|bir dakika lütfen|güvenlik doğrulaması|attention required|checking your browser|cf-chl|cloudflare|kötü niyetli bot/.test(blob);
+                      if (challenge) return false;
+                      return !!(document.title || (document.body && document.body.innerText.trim().length > 20));
+                    }""",
                     timeout=20000,
                 )
             except PlaywrightTimeoutError:
-                pass
+                wait_out_challenge(page, 35000)
             dismiss_overlays(page)
             return
         except Exception as exc:
@@ -889,6 +942,49 @@ def goto(page: Page, url: str) -> None:
         "Trendyol HTTP proxy üzerinden açılmadı. DataImpulse bakiyesi ve "
         f"PROXY_SERVER=http://LOGIN:SIFRE@gw.dataimpulse.com:823 kontrol et. ({text[:180]})"
     )
+
+
+def new_browser_context(browser):
+    return browser.new_context(
+        locale="tr-TR",
+        timezone_id="Europe/Istanbul",
+        viewport={"width": 1280, "height": 800},
+        ignore_https_errors=True,
+        extra_http_headers={"Accept-Language": "tr-TR,tr;q=0.9,en;q=0.8"},
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+    )
+
+
+def is_challenge_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "cloudflare",
+            "bot duvarı",
+            "bot/captcha",
+            "güvenlik doğrulaması",
+            "bir dakika",
+        )
+    )
+
+
+def recycle_context(browser, context, page):
+    try:
+        page.close()
+    except Exception:
+        pass
+    try:
+        context.close()
+    except Exception:
+        pass
+    context = new_browser_context(browser)
+    page = new_page(context)
+    return context, page
 
 
 def launch_browser(playwright, headed: bool):
@@ -978,18 +1074,9 @@ def run_job_loop(
 
     with sync_playwright() as playwright:
         browser = launch_browser(playwright, headed=headed)
-        context = browser.new_context(
-            locale="tr-TR",
-            timezone_id="Europe/Istanbul",
-            viewport={"width": 1280, "height": 800},
-            ignore_https_errors=True,
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-        )
+        context = new_browser_context(browser)
         page = new_page(context)
+        challenge_streak = 0
         try:
             while not stop_event.is_set():
                 stats["attempts"] = int(stats.get("attempts", 0)) + 1
@@ -1003,6 +1090,7 @@ def run_job_loop(
                         index=1,
                         from_home=from_home,
                     )
+                    challenge_streak = 0
                     prev_overall = stats.get("overall")
                     prev_page = stats.get("listing_page")
                     prev_rank = stats.get("rank")
@@ -1039,11 +1127,21 @@ def run_job_loop(
                 except Exception as exc:
                     stats["fail"] = int(stats.get("fail", 0)) + 1
                     stats["last_error"] = str(exc).split("\n", 1)[0][:400]
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
-                    page = new_page(context)
+                    if is_challenge_error(exc):
+                        challenge_streak += 1
+                        wait_s = min(CHALLENGE_BACKOFF_SECONDS * challenge_streak, 90)
+                        print(
+                            f"Cloudflare: yeni proxy IP için tarayıcı yenileniyor, {wait_s}s bekleniyor",
+                            flush=True,
+                        )
+                        stop_event.wait(wait_s)
+                        context, page = recycle_context(browser, context, page)
+                    else:
+                        try:
+                            page.close()
+                        except Exception:
+                            pass
+                        page = new_page(context)
                 stats["last_duration"] = round(time.perf_counter() - started, 2)
                 if should_continue is not None and not should_continue():
                     stats["status"] = "queued"
@@ -1096,17 +1194,7 @@ def run(
 
     with sync_playwright() as playwright:
         browser = launch_browser(playwright, headed=headed)
-        context = browser.new_context(
-            locale="tr-TR",
-            timezone_id="Europe/Istanbul",
-            viewport={"width": 1280, "height": 800},
-            ignore_https_errors=True,
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
-        )
+        context = new_browser_context(browser)
         page = new_page(context)
 
         try:
