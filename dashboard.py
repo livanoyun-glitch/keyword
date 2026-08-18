@@ -32,7 +32,7 @@ DEFAULT_JOBS = [
     {"keyword": "parmak eldiveni", "product_id": "817896706"},
 ]
 DEFAULT_TARGET_RANK = 10
-DEFAULT_MAX_CONCURRENT = 8
+DEFAULT_MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "8"))
 MAX_CONCURRENT_LIMIT = 50
 PRODUCT_IN_TEXT = re.compile(r"-p-(\d+)")
 
@@ -304,7 +304,10 @@ def maybe_start_queued_locked() -> None:
         if job.get("enabled")
         and job["stats"].get("status") != "done"
         and not job_thread_alive(job)
-        and (now - float(job["stats"].get("started_at") or 0)) >= CHECK_INTERVAL_SECONDS
+        and (
+            not job["stats"].get("started_at")
+            or (now - float(job["stats"].get("started_at") or 0)) >= CHECK_INTERVAL_SECONDS
+        )
     ]
     # En uzun süredir tur atmamış (ya da hiç başlamamış) job'u öncelikle başlat:
     # MAX_CONCURRENT'i aşan kombinasyonlarda job'lar sırayla döner, tek bir job
@@ -325,7 +328,10 @@ def others_waiting(current_job: dict) -> bool:
             and job.get("enabled")
             and job["stats"].get("status") != "done"
             and not job_thread_alive(job)
-            and (now - float(job["stats"].get("started_at") or 0)) >= CHECK_INTERVAL_SECONDS
+            and (
+            not job["stats"].get("started_at")
+            or (now - float(job["stats"].get("started_at") or 0)) >= CHECK_INTERVAL_SECONDS
+        )
             for job in JOBS.values()
         )
 
@@ -519,6 +525,7 @@ def start_job(job_id: str) -> dict:
         if not job:
             raise KeyError("Döngü bulunamadı.")
         job["enabled"] = True
+        job["stats"]["started_at"] = 0
         if job["stats"].get("status") == "done":
             job["stats"]["status"] = "queued"
         persist_jobs_locked()
@@ -536,6 +543,7 @@ def start_product(product_id: str) -> int:
             if job["stats"].get("status") == "done":
                 continue
             job["enabled"] = True
+            job["stats"]["started_at"] = 0
             if not job_thread_alive(job):
                 started += 1
         persist_jobs_locked()
@@ -665,13 +673,17 @@ def restore_jobs() -> None:
 
 
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, format: str, *args) -> None:
         return
 
     def _send(self, code: int, body: bytes, content_type: str) -> None:
+        self.close_connection = True
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -688,6 +700,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         path = urlparse(self.path).path
+        if path in {"/health", "/healthz"}:
+            self._json(200, {"ok": True})
+            return
         if path in {"/", "/index.html"}:
             html = Path(__file__).with_name("panel.html").read_text(encoding="utf-8")
             self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
