@@ -18,6 +18,7 @@ import socket
 import ssl
 import sys
 import time
+import uuid
 from datetime import datetime
 from threading import Event, Lock, Thread
 from urllib.parse import quote_plus, unquote, urlparse
@@ -61,7 +62,7 @@ HOURLY_HISTORY_LIMIT = 168
 # Turlar arası bekleme (saniye). 0 = ara vermeden tekrar ara.
 CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "3"))
 # Cloudflare ara sayfası geçmezse yeni IP denemeden önce bekleme.
-CHALLENGE_BACKOFF_SECONDS = int(os.environ.get("CHALLENGE_BACKOFF_SECONDS", "30"))
+CHALLENGE_BACKOFF_SECONDS = int(os.environ.get("CHALLENGE_BACKOFF_SECONDS", "20"))
 CHALLENGE_MARKERS = (
     "just a moment",
     "bir dakika lütfen",
@@ -459,7 +460,7 @@ def find_product_in_results(
         listing_wait = 25000 if page_index == 1 else 10000
         if not wait_for_listing(page, listing_wait):
             if page_index == 1:
-                if wait_out_challenge(page, 35000):
+                if wait_out_challenge(page, 45000):
                     pass
                 else:
                     page.wait_for_timeout(2500)
@@ -623,7 +624,7 @@ def search_from_homepage(page: Page, keyword: str) -> None:
 
 
 _PROXY_SETTINGS_CACHE: list[dict[str, str] | None] | None = None
-_LOCAL_PROXY: "AuthInjectingProxy | None" = None
+_SESSION_PROXIES: dict[str, "AuthInjectingProxy"] = {}
 _LOCAL_PROXY_LOCK = Lock()
 _PROBE_LOCK = Lock()
 _PROBE_OK = False
@@ -703,12 +704,24 @@ def parse_proxy_settings() -> dict[str, str] | None:
     return settings
 
 
-def build_proxy_config() -> dict[str, str] | None:
+def build_proxy_config(session_id: str | None = None) -> dict[str, str] | None:
     """Playwright'a verilen proxy. Auth yerel tünele gömülür."""
-    local = ensure_local_proxy()
+    local = ensure_session_proxy(session_id or "probe")
     if local is None:
         return None
     return {"server": f"http://127.0.0.1:{local.port}"}
+
+
+def with_sessid(username: str, session_id: str) -> str:
+    raw = (username or "").strip()
+    if ";sessid." in raw:
+        raw = raw.split(";sessid.")[0]
+    token = re.sub(r"[^a-zA-Z0-9]", "", session_id)[:16] or "1"
+    return f"{raw};sessid.{token}"
+
+
+def new_session_id() -> str:
+    return uuid.uuid4().hex[:12]
 
 
 def _basic_token(username: str, password: str) -> str:
@@ -799,7 +812,7 @@ def _probe_proxy_once() -> None:
             sock.close()
         except Exception:
             pass
-    ensure_local_proxy()
+    ensure_session_proxy("probe")
 
 
 class AuthInjectingProxy(Thread):
@@ -897,24 +910,42 @@ def _pipe_sockets(left: socket.socket, right: socket.socket) -> None:
             other.sendall(data)
 
 
-def ensure_local_proxy() -> AuthInjectingProxy | None:
-    global _LOCAL_PROXY
+def ensure_session_proxy(session_id: str) -> AuthInjectingProxy | None:
     settings = parse_proxy_settings()
     if not settings:
         return None
     if not settings["username"] or not settings["password"]:
         return None
+    sid = session_id or "probe"
+    username = with_sessid(settings["username"], sid)
     with _LOCAL_PROXY_LOCK:
-        if _LOCAL_PROXY is None:
-            _LOCAL_PROXY = AuthInjectingProxy(
+        proxy = _SESSION_PROXIES.get(sid)
+        if proxy is None:
+            proxy = AuthInjectingProxy(
                 settings["host"],
                 int(settings["port"]),
-                settings["username"],
+                username,
                 settings["password"],
             )
-            _LOCAL_PROXY.start()
-            print(f"Yerel proxy tüneli: 127.0.0.1:{_LOCAL_PROXY.port} -> {settings['host']}:{settings['port']}", flush=True)
-        return _LOCAL_PROXY
+            proxy.start()
+            _SESSION_PROXIES[sid] = proxy
+            print(
+                f"Yerel proxy tüneli: 127.0.0.1:{proxy.port} sessid={sid} -> {settings['host']}:{settings['port']}",
+                flush=True,
+            )
+        return proxy
+
+
+def drop_session_proxy(session_id: str) -> None:
+    with _LOCAL_PROXY_LOCK:
+        proxy = _SESSION_PROXIES.pop(session_id, None)
+    if proxy is None:
+        return
+    try:
+        proxy.stop()
+    except Exception:
+        pass
+    print(f"Proxy oturumu kapatıldı: {session_id}", flush=True)
 
 
 def navigation_timeout_ms() -> int:
@@ -939,8 +970,10 @@ def goto(page: Page, url: str) -> None:
                     timeout=20000,
                 )
             except PlaywrightTimeoutError:
-                wait_out_challenge(page, 35000)
+                wait_out_challenge(page, 45000)
             dismiss_overlays(page)
+            if snapshot_is_challenge(listing_page_snapshot(page)):
+                raise RuntimeError(listing_failure_message(page, "Arama listesi yüklenmedi"))
             return
         except Exception as exc:
             last_error = exc
@@ -998,8 +1031,30 @@ def recycle_context(browser, context, page):
     return context, page
 
 
-def launch_browser(playwright, headed: bool):
-    proxy = build_proxy_config()
+def rotate_proxy_browser(playwright, headed: bool, session_id: str, browser, context, page):
+    try:
+        page.close()
+    except Exception:
+        pass
+    try:
+        context.close()
+    except Exception:
+        pass
+    try:
+        browser.close()
+    except Exception:
+        pass
+    drop_session_proxy(session_id)
+    session_id = new_session_id()
+    browser = launch_browser(playwright, headed=headed, session_id=session_id)
+    context = new_browser_context(browser)
+    page = new_page(context)
+    print(f"Cloudflare: yeni DataImpulse sessid={session_id}", flush=True)
+    return session_id, browser, context, page
+
+
+def launch_browser(playwright, headed: bool, session_id: str | None = None):
+    proxy = build_proxy_config(session_id)
     args = [
         "--disable-blink-features=AutomationControlled",
         "--disable-notifications",
@@ -1083,8 +1138,9 @@ def run_job_loop(
     probe_proxy()
 
     yielded = False
+    session_id = new_session_id()
     with sync_playwright() as playwright:
-        browser = launch_browser(playwright, headed=headed)
+        browser = launch_browser(playwright, headed=headed, session_id=session_id)
         context = new_browser_context(browser)
         page = new_page(context)
         challenge_streak = 0
@@ -1142,11 +1198,15 @@ def run_job_loop(
                         challenge_streak += 1
                         wait_s = min(CHALLENGE_BACKOFF_SECONDS * challenge_streak, 90)
                         print(
-                            f"Cloudflare: yeni proxy IP için tarayıcı yenileniyor, {wait_s}s bekleniyor",
+                            f"Cloudflare: DataImpulse IP değişiyor, {wait_s}s bekleniyor",
                             flush=True,
                         )
                         stop_event.wait(wait_s)
-                        context, page = recycle_context(browser, context, page)
+                        if stop_event.is_set():
+                            break
+                        session_id, browser, context, page = rotate_proxy_browser(
+                            playwright, headed, session_id, browser, context, page
+                        )
                     else:
                         try:
                             page.close()
@@ -1168,6 +1228,7 @@ def run_job_loop(
                 browser.close()
             except Exception:
                 pass
+            drop_session_proxy(session_id)
             if stats.get("status") == "done":
                 pass
             elif stop_event.is_set():
@@ -1207,7 +1268,8 @@ def run(
     probe_proxy()
 
     with sync_playwright() as playwright:
-        browser = launch_browser(playwright, headed=headed)
+        session_id = new_session_id()
+        browser = launch_browser(playwright, headed=headed, session_id=session_id)
         context = new_browser_context(browser)
         page = new_page(context)
 
@@ -1254,8 +1316,15 @@ def run(
             print(f"Durduruldu. Tamamlanan tur: {completed} | toplam {total:.1f}s", flush=True)
             raise
         finally:
-            context.close()
-            browser.close()
+            try:
+                context.close()
+            except Exception:
+                pass
+            try:
+                browser.close()
+            except Exception:
+                pass
+            drop_session_proxy(session_id)
 
 
 def main() -> int:
