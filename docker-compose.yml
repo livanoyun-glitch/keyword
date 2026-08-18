@@ -8,7 +8,7 @@ services:
       DATA_DIR: /app/data
       OPEN_BROWSER: "0"
       PLAYWRIGHT_DOCKER: "1"
-      MAX_CONCURRENT: "3"
+      MAX_CONCURRENT: "8"
       CHECK_INTERVAL_SECONDS: "3"
       PROXY_SERVER: "http://ddd817fa8b6e8d6729f8__cr.tr:6a4c0717f643a9d8@gw.dataimpulse.com:823"
     ports:

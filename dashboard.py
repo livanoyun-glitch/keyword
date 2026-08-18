@@ -295,33 +295,43 @@ def public_state() -> dict:
     }
 
 
-def maybe_start_queued_locked() -> None:
-    enabled = [
+def enabled_runnable_jobs_locked() -> list:
+    return [
         job
         for job in JOBS.values()
-        if job.get("enabled")
-        and job["stats"].get("status") != "done"
-        and not job_thread_alive(job)
+        if job.get("enabled") and job["stats"].get("status") != "done"
     ]
-    # En uzun süredir tur atmamış (ya da hiç başlamamış) job'u öncelikle başlat:
-    # MAX_CONCURRENT'i aşan kombinasyonlarda job'lar sırayla döner, tek bir job
-    # slotu sonsuza kadar tutmaz.
-    while enabled and running_count() < MAX_CONCURRENT:
-        job = min(enabled, key=lambda item: item["stats"].get("started_at") or 0)
-        spawn_worker(job)
-        enabled.remove(job)
 
 
-def others_waiting(current_job: dict) -> bool:
-    """Sırasını bekleyen (enabled, boşta) başka job var mı?"""
+def fair_share_locked(job: dict) -> int:
+    enabled = enabled_runnable_jobs_locked()
+    if not enabled or job not in enabled:
+        return 0
+    base, remainder = divmod(max(1, MAX_CONCURRENT), len(enabled))
+    order = sorted(enabled, key=lambda item: item["id"])
+    return base + (1 if order.index(job) < remainder else 0)
+
+
+def worker_keep_going(job: dict, worker_id: int) -> bool:
     with LOCK:
-        return any(
-            job is not current_job
-            and job.get("enabled")
-            and job["stats"].get("status") != "done"
-            and not job_thread_alive(job)
-            for job in JOBS.values()
-        )
+        if not job.get("enabled") or job["stats"].get("status") == "done":
+            return False
+        share = fair_share_locked(job)
+        ids = sorted(job.get("worker_ids") or [])
+        return worker_id in set(ids[:share])
+
+
+def maybe_start_queued_locked() -> None:
+    while running_count() < MAX_CONCURRENT:
+        candidates = [
+            job
+            for job in enabled_runnable_jobs_locked()
+            if len(job_workers(job)) < fair_share_locked(job)
+        ]
+        if not candidates:
+            break
+        job = min(candidates, key=lambda item: (len(job_workers(item)), item["id"]))
+        spawn_worker(job)
 
 
 def save_product_image(product_id: str, image_url: str) -> None:
@@ -339,11 +349,19 @@ def spawn_worker(job: dict) -> None:
     job["enabled"] = True
     if not job_thread_alive(job):
         job["stop"].clear()
-    job["stats"]["status"] = "starting"
-    job["stats"]["started_at"] = time.time()
+    worker_id = int(job.get("worker_seq") or 0) + 1
+    job["worker_seq"] = worker_id
+    job.setdefault("worker_ids", set()).add(worker_id)
+    if job["stats"].get("status") not in {"running", "starting"}:
+        job["stats"]["status"] = "starting"
+    if not job["stats"].get("started_at"):
+        job["stats"]["started_at"] = time.time()
     job["stats"]["target_rank"] = TARGET_RANK
+    delay = min((len(job_workers(job))) * 0.35, 2.8)
 
     def worker() -> None:
+        if delay:
+            time.sleep(delay)
         try:
             run_job_loop(
                 keyword=job["keyword"],
@@ -354,20 +372,30 @@ def spawn_worker(job: dict) -> None:
                     job["keyword"], job["product_id"], history
                 ),
                 on_image=lambda url: save_product_image(job["product_id"], url),
-                should_continue=lambda: not others_waiting(job),
+                should_continue=lambda: worker_keep_going(job, worker_id),
             )
         except Exception as exc:
-            job["stats"]["status"] = "error"
-            job["stats"]["last_error"] = str(exc).split("\n", 1)[0][:400]
+            with LOCK:
+                job["stats"]["last_error"] = str(exc).split("\n", 1)[0][:400]
+                if len(job_workers(job)) <= 1 and job["stats"].get("status") != "done":
+                    job["stats"]["status"] = "error"
         finally:
             with LOCK:
+                job.setdefault("worker_ids", set()).discard(worker_id)
+                job["threads"] = [
+                    thread
+                    for thread in (job.get("threads") or [])
+                    if thread is not threading.current_thread() and thread.is_alive()
+                ]
                 if job["stats"].get("status") == "done":
                     job["enabled"] = False
                     job["stop"].set()
+                elif job_thread_alive(job) and job["stats"].get("status") == "error":
+                    job["stats"]["status"] = "running"
                 persist_jobs_locked()
                 maybe_start_queued_locked()
 
-    thread = threading.Thread(target=worker, name=f"job-{job['id']}", daemon=True)
+    thread = threading.Thread(target=worker, name=f"job-{job['id']}-{worker_id}", daemon=True)
     job.setdefault("threads", []).append(thread)
     job["thread"] = thread
     thread.start()
@@ -417,6 +445,8 @@ def add_job(
             "stop": threading.Event(),
             "thread": None,
             "threads": [],
+            "worker_ids": set(),
+            "worker_seq": 0,
         }
         job["stats"]["history"] = history
         job["stats"]["best_overall"] = best_from_history(history)
@@ -479,6 +509,8 @@ def assign_keywords(product_ids: list[str] | None = None, keywords: list[str] | 
                     "stop": threading.Event(),
                     "thread": None,
                     "threads": [],
+                    "worker_ids": set(),
+                    "worker_seq": 0,
                 }
                 job["stats"]["history"] = history
                 job["stats"]["best_overall"] = best_from_history(history)
@@ -513,6 +545,7 @@ def start_job(job_id: str) -> dict:
         if not job:
             raise KeyError("Döngü bulunamadı.")
         job["enabled"] = True
+        job["stop"].clear()
         job["stats"]["started_at"] = 0
         if job["stats"].get("status") == "done":
             job["stats"]["status"] = "queued"
@@ -531,6 +564,7 @@ def start_product(product_id: str) -> int:
             if job["stats"].get("status") == "done":
                 continue
             job["enabled"] = True
+            job["stop"].clear()
             job["stats"]["started_at"] = 0
             if not job_thread_alive(job):
                 started += 1
@@ -623,7 +657,13 @@ def restore_jobs() -> None:
             persist_jobs_locked()
         return
     TARGET_RANK = max(1, int(saved.get("target_rank") or DEFAULT_TARGET_RANK))
-    MAX_CONCURRENT = max(1, min(MAX_CONCURRENT_LIMIT, int(saved.get("max_concurrent") or DEFAULT_MAX_CONCURRENT)))
+    if os.environ.get("MAX_CONCURRENT"):
+        MAX_CONCURRENT = max(1, min(MAX_CONCURRENT_LIMIT, int(os.environ["MAX_CONCURRENT"])))
+    else:
+        MAX_CONCURRENT = max(
+            1,
+            min(MAX_CONCURRENT_LIMIT, int(saved.get("max_concurrent") or DEFAULT_MAX_CONCURRENT)),
+        )
     with LOCK:
         PRODUCTS[:] = unique_keep_order(
             [
@@ -775,10 +815,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def scheduler_loop() -> None:
-    """MAX_CONCURRENT'i aşan job sayısında sırayla dönüşü sürdürür: periyodik
-    olarak turu gelmiş bekleyen job var mı diye bakar ve varsa başlatır.
-    (spawn_worker/stop_job zaten bunu tetikliyor; bu thread sadece hiçbir
-    HTTP isteği gelmediği sürelerde de rotasyonun devam etmesini sağlar.)"""
+    """Boş tarayıcı slotlarını çalışan işlere doldurur. Tek kelime varsa
+    MAX_CONCURRENT tarayıcının hepsi o kelimede çalışır."""
     while True:
         time.sleep(15)
         with LOCK:

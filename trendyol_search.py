@@ -625,6 +625,8 @@ def search_from_homepage(page: Page, keyword: str) -> None:
 _PROXY_SETTINGS_CACHE: list[dict[str, str] | None] | None = None
 _LOCAL_PROXY: "AuthInjectingProxy | None" = None
 _LOCAL_PROXY_LOCK = Lock()
+_PROBE_LOCK = Lock()
+_PROBE_OK = False
 
 
 def _split_proxy_url(raw: str) -> tuple[str, str, int | None, str, str]:
@@ -726,6 +728,15 @@ def _read_http_headers(sock: socket.socket) -> bytes:
 
 
 def probe_proxy() -> None:
+    global _PROBE_OK
+    with _PROBE_LOCK:
+        if _PROBE_OK:
+            return
+        _probe_proxy_once()
+        _PROBE_OK = True
+
+
+def _probe_proxy_once() -> None:
     settings = parse_proxy_settings()
     if not settings:
         return
@@ -1068,10 +1079,10 @@ def run_job_loop(
         raise ValueError("Anahtar kelime boş olamaz.")
 
     stats["status"] = "running"
-    stats["last_error"] = ""
     stats["history"] = normalize_hourly_history(stats.get("history") or [])
     probe_proxy()
 
+    yielded = False
     with sync_playwright() as playwright:
         browser = launch_browser(playwright, headed=headed)
         context = new_browser_context(browser)
@@ -1144,7 +1155,7 @@ def run_job_loop(
                         page = new_page(context)
                 stats["last_duration"] = round(time.perf_counter() - started, 2)
                 if should_continue is not None and not should_continue():
-                    stats["status"] = "queued"
+                    yielded = True
                     break
                 if CHECK_INTERVAL_SECONDS > 0:
                     stop_event.wait(CHECK_INTERVAL_SECONDS)
@@ -1157,12 +1168,15 @@ def run_job_loop(
                 browser.close()
             except Exception:
                 pass
-            if stats.get("status") in {"done", "queued"}:
+            if stats.get("status") == "done":
                 pass
-            elif not stop_event.is_set():
-                stats["status"] = "error"
+            elif stop_event.is_set():
+                if stats.get("status") not in {"done", "stopped"}:
+                    stats["status"] = "stopped"
+            elif yielded:
+                pass
             else:
-                stats["status"] = "stopped"
+                stats["status"] = "error"
 
 
 def run(
