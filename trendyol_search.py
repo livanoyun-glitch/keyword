@@ -10,14 +10,17 @@ Kullanım:
 from __future__ import annotations
 
 import argparse
+import base64
 import os
 import re
+import select
+import socket
+import ssl
 import sys
 import time
 from datetime import datetime
-from threading import Event
-from urllib.parse import quote, quote_plus, unquote, urlparse
-from urllib.request import ProxyHandler, Request, build_opener
+from threading import Event, Lock, Thread
+from urllib.parse import quote_plus, unquote, urlparse
 from zoneinfo import ZoneInfo
 
 from playwright.sync_api import (
@@ -572,37 +575,58 @@ def search_from_homepage(page: Page, keyword: str) -> None:
     page.wait_for_url(re.compile(r"/sr"), timeout=15000)
 
 
-def build_proxy_config() -> dict[str, str] | None:
-    """PROXY_SERVER / PROXY_USERNAME / PROXY_PASSWORD.
+_PROXY_SETTINGS_CACHE: list[dict[str, str] | None] | None = None
+_LOCAL_PROXY: "AuthInjectingProxy | None" = None
+_LOCAL_PROXY_LOCK = Lock()
 
-    Chromium SOCKS5'te kullanıcı/şifre göndermez (ERR_SOCKS_CONNECTION_FAILED).
-    DataImpulse Playwright kurulumu HTTP 823 + ayrı username/password ister.
-    socks5://...:824 verilse bile otomatik http://...:823 yapılır.
-    """
-    raw = (os.environ.get("PROXY_SERVER") or "").strip().strip("\"'")
-    if not raw:
-        return None
-    if "://" not in raw:
-        raw = f"http://{raw}"
-    parsed = urlparse(raw)
-    scheme = (parsed.scheme or "http").lower()
-    host = parsed.hostname
-    if not host:
-        print("Proxy: PROXY_SERVER host okunamadı", flush=True)
-        return None
-    port = parsed.port
-    username = unquote(
-        os.environ.get("PROXY_USERNAME")
-        or parsed.username
-        or ""
-    ).strip()
+
+def _split_proxy_url(raw: str) -> tuple[str, str, int | None, str, str]:
+    text = raw.strip().strip("\"'")
+    if "://" not in text:
+        text = f"http://{text}"
+    scheme, rest = text.split("://", 1)
+    username = ""
+    password = ""
+    if "@" in rest:
+        creds, rest = rest.rsplit("@", 1)
+        if ":" in creds:
+            username, password = creds.split(":", 1)
+        else:
+            username = creds
+    hostport = rest.split("/", 1)[0]
+    port: int | None = None
+    if ":" in hostport and hostport.rsplit(":", 1)[-1].isdigit():
+        host, port_s = hostport.rsplit(":", 1)
+        port = int(port_s)
+    else:
+        host = hostport
+    parsed = urlparse(text)
+    host = host or (parsed.hostname or "")
+    port = port if port is not None else parsed.port
+    username = unquote(os.environ.get("PROXY_USERNAME") or username or parsed.username or "").strip()
     password = unquote(
         os.environ.get("PROXY_PASSWORD")
         or os.environ.get("PROXY_PASS")
+        or password
         or parsed.password
         or ""
     ).strip()
+    return scheme.lower(), host, port, username, password
 
+
+def parse_proxy_settings() -> dict[str, str] | None:
+    global _PROXY_SETTINGS_CACHE
+    if _PROXY_SETTINGS_CACHE is not None:
+        return _PROXY_SETTINGS_CACHE[0]
+    raw = (os.environ.get("PROXY_SERVER") or "").strip().strip("\"'")
+    if not raw:
+        _PROXY_SETTINGS_CACHE = [None]
+        return None
+    scheme, host, port, username, password = _split_proxy_url(raw)
+    if not host:
+        print("Proxy: PROXY_SERVER host okunamadı", flush=True)
+        _PROXY_SETTINGS_CACHE = [None]
+        return None
     if scheme.startswith("socks"):
         print(
             "Chromium SOCKS5 şifre desteklemez; DataImpulse HTTP 823 kullanılıyor.",
@@ -611,53 +635,228 @@ def build_proxy_config() -> dict[str, str] | None:
         scheme = "http"
         if port in {None, 824}:
             port = 823
-
-    netloc = host if port is None else f"{host}:{port}"
-    server = f"{scheme}://{netloc}"
-    config: dict[str, str] = {
-        "server": server,
-        "bypass": "localhost,127.0.0.1,::1",
-    }
-    if username:
-        config["username"] = username
-    if password:
-        config["password"] = password
+    if port is None:
+        port = 823
+    user_hint = f"{username[:4]}… len={len(username)}" if username else "YOK"
     print(
-        f"Proxy: {server} auth={'yes' if username and password else 'NO'}",
+        f"Proxy: {scheme}://{host}:{port} user={user_hint} auth="
+        f"{'yes' if username and password else 'NO'}",
         flush=True,
     )
-    if not username or not password:
-        print(
-            "Proxy uyarısı: kullanıcı/şifre yok. PROXY_SERVER "
-            "http://LOGIN:SIFRE@gw.dataimpulse.com:823 olmalı.",
-            flush=True,
-        )
-    return config
+    settings = {
+        "scheme": scheme,
+        "host": host,
+        "port": str(port),
+        "username": username,
+        "password": password,
+    }
+    _PROXY_SETTINGS_CACHE = [settings]
+    return settings
+
+
+def build_proxy_config() -> dict[str, str] | None:
+    """Playwright'a verilen proxy. Auth yerel tünele gömülür."""
+    local = ensure_local_proxy()
+    if local is None:
+        return None
+    return {"server": f"http://127.0.0.1:{local.port}"}
+
+
+def _basic_token(username: str, password: str) -> str:
+    return base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+
+
+def _read_http_headers(sock: socket.socket) -> bytes:
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > 65536:
+            break
+    return buf
 
 
 def probe_proxy() -> None:
-    config = build_proxy_config()
-    if not config:
+    settings = parse_proxy_settings()
+    if not settings:
         return
-    parsed = urlparse(config["server"])
-    host = parsed.hostname
-    port = parsed.port or 823
-    username = config.get("username") or ""
-    password = config.get("password") or ""
-    auth = ""
-    if username:
-        auth = f"{quote(username, safe='')}:{quote(password, safe='')}@"
-    proxy_url = f"http://{auth}{host}:{port}"
-    opener = build_opener(ProxyHandler({"http": proxy_url, "https": proxy_url}))
-    try:
-        with opener.open(Request("https://api.ipify.org"), timeout=25) as response:
-            ip = response.read().decode("utf-8", "replace").strip()[:64]
-        print(f"Proxy ön kontrol OK, çıkış IP: {ip}", flush=True)
-    except Exception as exc:
+    username = settings["username"]
+    password = settings["password"]
+    if not username or not password:
         raise RuntimeError(
-            "DataImpulse HTTP 823 bağlanamadı. Bakiye, login/şifre ve VPS'in "
-            f"gw.dataimpulse.com:823 çıkışına açık olduğunu kontrol et. ({exc})"
+            "PROXY_SERVER içinde login:şifre yok. Coolify Environment'ta tek satır: "
+            "http://LOGIN:SIFRE@gw.dataimpulse.com:823 (407 NO_USER bunun yüzünden çıkar)."
+        )
+    host = settings["host"]
+    port = int(settings["port"])
+    token = _basic_token(username, password)
+    sock = socket.create_connection((host, port), timeout=25)
+    try:
+        sock.sendall(
+            (
+                "CONNECT api.ipify.org:443 HTTP/1.1\r\n"
+                "Host: api.ipify.org:443\r\n"
+                f"Proxy-Authorization: Basic {token}\r\n"
+                "\r\n"
+            ).encode("ascii")
+        )
+        response = _read_http_headers(sock)
+        status = response.split(b"\r\n", 1)[0].decode("latin1", "replace")
+        if b" 200 " not in response.split(b"\r\n", 1)[0]:
+            raise RuntimeError(status[:180] or "proxy CONNECT reddetti")
+        tls = ssl.create_default_context().wrap_socket(sock, server_hostname="api.ipify.org")
+        try:
+            tls.sendall(b"GET / HTTP/1.1\r\nHost: api.ipify.org\r\nConnection: close\r\n\r\n")
+            body = b""
+            while True:
+                chunk = tls.recv(4096)
+                if not chunk:
+                    break
+                body += chunk
+        finally:
+            try:
+                tls.close()
+            except Exception:
+                pass
+        text = body.decode("utf-8", "replace")
+        ip = text.rsplit("\r\n\r\n", 1)[-1].strip()[:64]
+        print(f"Proxy ön kontrol OK, çıkış IP: {ip}", flush=True)
+    except OSError as exc:
+        raise RuntimeError(
+            f"DataImpulse {host}:{port} bağlanamadı ({exc}). VPS çıkış/firewall kontrol et."
         ) from exc
+    except Exception as exc:
+        text = str(exc)
+        if "NO_USER" in text:
+            raise RuntimeError(
+                "DataImpulse 407 NO_USER: login/plan yok veya şifre yanlış. "
+                "Dashboard > Proxy Access login/şifreyi kopyala; Coolify'da "
+                "PROXY_SERVER=http://LOGIN:SIFRE@gw.dataimpulse.com:823 olsun."
+            ) from exc
+        raise RuntimeError(f"DataImpulse proxy ön kontrol başarısız: {text[:180]}") from exc
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+    ensure_local_proxy()
+
+
+class AuthInjectingProxy(Thread):
+    """Chromium 407 challenge beklemesin diye DataImpulse'a Basic auth'u ilk CONNECT'te ekler."""
+
+    def __init__(self, host: str, port: int, username: str, password: str) -> None:
+        super().__init__(name="auth-http-proxy", daemon=True)
+        self.upstream = (host, port)
+        self.token = _basic_token(username, password)
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind(("127.0.0.1", 0))
+        self._sock.listen(128)
+        self.port = int(self._sock.getsockname()[1])
+        self._stop = Event()
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            self._sock.close()
+        except Exception:
+            pass
+
+    def run(self) -> None:
+        self._sock.settimeout(1.0)
+        while not self._stop.is_set():
+            try:
+                client, _addr = self._sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            Thread(target=self._handle, args=(client,), daemon=True).start()
+
+    def _handle(self, client: socket.socket) -> None:
+        upstream: socket.socket | None = None
+        try:
+            client.settimeout(30)
+            request = _read_http_headers(client)
+            if b"\r\n\r\n" not in request:
+                return
+            header, rest = request.split(b"\r\n\r\n", 1)
+            first = header.split(b"\r\n", 1)[0].decode("latin1", "replace")
+            parts = first.split()
+            if len(parts) < 2:
+                return
+            method, target = parts[0], parts[1]
+            upstream = socket.create_connection(self.upstream, timeout=25)
+            auth = f"Proxy-Authorization: Basic {self.token}\r\n"
+            if method.upper() == "CONNECT":
+                payload = (
+                    f"CONNECT {target} HTTP/1.1\r\n"
+                    f"Host: {target}\r\n"
+                    f"{auth}"
+                    "\r\n"
+                ).encode("latin1")
+                upstream.sendall(payload)
+                reply = _read_http_headers(upstream)
+                client.sendall(reply)
+                status = reply.split(b"\r\n", 1)[0]
+                if b" 200 " not in status:
+                    return
+                if rest:
+                    upstream.sendall(rest)
+            else:
+                lines = header.decode("latin1", "replace").split("\r\n")
+                lines = [line for line in lines if not line.lower().startswith("proxy-authorization")]
+                if lines:
+                    lines.insert(1, f"Proxy-Authorization: Basic {self.token}")
+                upstream.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin1") + rest)
+            _pipe_sockets(client, upstream)
+        except Exception:
+            pass
+        finally:
+            for sock in (client, upstream):
+                if sock is None:
+                    continue
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+
+
+def _pipe_sockets(left: socket.socket, right: socket.socket) -> None:
+    sockets = [left, right]
+    while True:
+        readable, _, _ = select.select(sockets, [], [], 60)
+        if not readable:
+            return
+        for sock in readable:
+            other = right if sock is left else left
+            data = sock.recv(65536)
+            if not data:
+                return
+            other.sendall(data)
+
+
+def ensure_local_proxy() -> AuthInjectingProxy | None:
+    global _LOCAL_PROXY
+    settings = parse_proxy_settings()
+    if not settings:
+        return None
+    if not settings["username"] or not settings["password"]:
+        return None
+    with _LOCAL_PROXY_LOCK:
+        if _LOCAL_PROXY is None:
+            _LOCAL_PROXY = AuthInjectingProxy(
+                settings["host"],
+                int(settings["port"]),
+                settings["username"],
+                settings["password"],
+            )
+            _LOCAL_PROXY.start()
+            print(f"Yerel proxy tüneli: 127.0.0.1:{_LOCAL_PROXY.port} -> {settings['host']}:{settings['port']}", flush=True)
+        return _LOCAL_PROXY
 
 
 def navigation_timeout_ms() -> int:
@@ -702,12 +901,7 @@ def launch_browser(playwright, headed: bool):
     if os.environ.get("PLAYWRIGHT_DOCKER") == "1":
         args.extend(["--no-sandbox", "--disable-gpu"])
     if proxy:
-        args.extend(
-            [
-                "--disable-http2",
-                "--proxy-bypass-list=<-loopback>",
-            ]
-        )
+        args.append("--disable-http2")
     return playwright.chromium.launch(
         headless=not headed,
         args=args,
