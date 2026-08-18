@@ -333,16 +333,11 @@ def find_product_in_results(
     keyword: str,
     product_id: str,
 ) -> tuple[Locator, int, int, int]:
-    nav_timeout = navigation_timeout_ms()
     empty_pages = 0
 
     for page_index in range(1, MAX_SEARCH_PAGES + 1):
         if page_index > 1:
-            page.goto(
-                search_url(keyword, page_index),
-                wait_until="domcontentloaded",
-                timeout=nav_timeout,
-            )
+            goto(page, search_url(keyword, page_index))
             dismiss_overlays(page)
 
         listing_wait = 15000 if page_index == 1 else 8000
@@ -469,9 +464,9 @@ def open_product(page: Page, card: Locator, product_id: str = "") -> Page:
     href = absolute_product_url(card.get_attribute("href"))
     if href and url_has_product_id(href, product_id):
         try:
-            page.goto(href, wait_until="domcontentloaded", timeout=navigation_timeout_ms())
+            goto(page, href)
         except Exception as exc:
-            if "ERR_ABORTED" in str(exc) and url_has_product_id(page.url, product_id):
+            if url_has_product_id(page.url, product_id):
                 return page
             raise
         return page
@@ -560,8 +555,24 @@ def build_proxy_config() -> dict[str, str] | None:
     return config
 
 
-def navigation_timeout_ms() -> int:
-    return 45000 if (os.environ.get("PROXY_SERVER") or "").strip() else 20000
+def goto(page: Page, url: str) -> None:
+    timeout = navigation_timeout_ms()
+    last_error: Exception | None = None
+    for attempt in range(2):
+        try:
+            page.goto(url, wait_until="commit", timeout=timeout)
+            return
+        except Exception as exc:
+            last_error = exc
+            message = str(exc)
+            if "ERR_SOCKS" in message or "ERR_PROXY" in message or "ERR_TUNNEL" in message:
+                break
+            page.wait_for_timeout(800)
+    text = str(last_error or "timeout")
+    raise RuntimeError(
+        "Trendyol proxy üzerinden açılmadı. DataImpulse bakiyesi, VPS IP whitelist "
+        f"ve PROXY_SERVER=http://LOGIN:SIFRE@gw.dataimpulse.com:823 kontrol et. ({text[:180]})"
+    )
 
 
 def launch_browser(playwright, headed: bool):
@@ -581,8 +592,9 @@ def launch_browser(playwright, headed: bool):
 
 def new_page(context) -> Page:
     page = context.new_page()
-    page.route("**/*", block_heavy_resources)
-    page.set_default_timeout(12000)
+    if not (os.environ.get("PROXY_SERVER") or "").strip():
+        page.route("**/*", block_heavy_resources)
+    page.set_default_timeout(navigation_timeout_ms())
     return page
 
 
@@ -594,13 +606,12 @@ def run_once(
     index: int,
     from_home: bool,
 ) -> tuple[Page, int, int, int, str]:
-    timeout = navigation_timeout_ms()
     if from_home:
-        page.goto(TRENDYOL_HOME, wait_until="domcontentloaded", timeout=timeout)
+        goto(page, TRENDYOL_HOME)
         dismiss_overlays(page)
         search_from_homepage(page, keyword)
     else:
-        page.goto(search_url(keyword), wait_until="domcontentloaded", timeout=timeout)
+        goto(page, search_url(keyword))
     dismiss_overlays(page)
 
     listing_page = 1
@@ -651,6 +662,7 @@ def run_job_loop(
             locale="tr-TR",
             timezone_id="Europe/Istanbul",
             viewport={"width": 1280, "height": 800},
+            ignore_https_errors=True,
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -767,6 +779,7 @@ def run(
             locale="tr-TR",
             timezone_id="Europe/Istanbul",
             viewport={"width": 1280, "height": 800},
+            ignore_https_errors=True,
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
