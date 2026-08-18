@@ -55,11 +55,8 @@ MAX_SEARCH_PAGES = 30
 PAGE_SIZE = 24
 ISTANBUL_TZ = ZoneInfo("Europe/Istanbul")
 HOURLY_HISTORY_LIMIT = 168
-# Bir job'un art arda iki tarama turu arasında bekleyeceği süre (saniye).
-# Sıralama geçmişi zaten saatlik tutulduğu için (record_hourly_rank) daha sık
-# taramak gereksiz trafik/istek üretir ve bot koruması tarafından yakalanma
-# riskini artırır. 0 verilirse eski (bekleme yok) davranışa döner.
-CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "1800"))
+# Turlar arası bekleme (saniye). 0 = ara vermeden tekrar ara.
+CHECK_INTERVAL_SECONDS = int(os.environ.get("CHECK_INTERVAL_SECONDS", "3"))
 
 LISTING_IDS_JS = """() => {
   const collect = (nodes) => {
@@ -647,9 +644,8 @@ def run_job_loop(
                         pass
                     page = new_page(context)
                 stats["last_duration"] = round(time.perf_counter() - started, 2)
-                # Başka job'lar sırasını bekliyorsa (MAX_CONCURRENT dolu) slotu hemen
-                # bırak; aksi halde eskisi gibi bir sonraki tura kadar bekle.
                 if should_continue is not None and not should_continue():
+                    stats["status"] = "queued"
                     break
                 if CHECK_INTERVAL_SECONDS > 0:
                     stop_event.wait(CHECK_INTERVAL_SECONDS)
@@ -662,7 +658,7 @@ def run_job_loop(
                 browser.close()
             except Exception:
                 pass
-            if stats.get("status") == "done":
+            if stats.get("status") in {"done", "queued"}:
                 pass
             elif not stop_event.is_set():
                 stats["status"] = "error"

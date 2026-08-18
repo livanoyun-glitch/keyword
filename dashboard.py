@@ -14,7 +14,6 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from trendyol_search import (
-    CHECK_INTERVAL_SECONDS,
     normalize_hourly_history,
     normalize_product_id,
     run_job_loop,
@@ -297,17 +296,12 @@ def public_state() -> dict:
 
 
 def maybe_start_queued_locked() -> None:
-    now = time.time()
     enabled = [
         job
         for job in JOBS.values()
         if job.get("enabled")
         and job["stats"].get("status") != "done"
         and not job_thread_alive(job)
-        and (
-            not job["stats"].get("started_at")
-            or (now - float(job["stats"].get("started_at") or 0)) >= CHECK_INTERVAL_SECONDS
-        )
     ]
     # En uzun süredir tur atmamış (ya da hiç başlamamış) job'u öncelikle başlat:
     # MAX_CONCURRENT'i aşan kombinasyonlarda job'lar sırayla döner, tek bir job
@@ -319,19 +313,13 @@ def maybe_start_queued_locked() -> None:
 
 
 def others_waiting(current_job: dict) -> bool:
-    """Sırasını bekleyen (enabled, boşta, turu gelmiş) başka job var mı?
-    (worker thread'inden, LOCK tutulmadan çağrılır; kendi kilidini kendi alır.)"""
-    now = time.time()
+    """Sırasını bekleyen (enabled, boşta) başka job var mı?"""
     with LOCK:
         return any(
             job is not current_job
             and job.get("enabled")
             and job["stats"].get("status") != "done"
             and not job_thread_alive(job)
-            and (
-            not job["stats"].get("started_at")
-            or (now - float(job["stats"].get("started_at") or 0)) >= CHECK_INTERVAL_SECONDS
-        )
             for job in JOBS.values()
         )
 
